@@ -1,0 +1,399 @@
+"""
+app.py — Trading-Journal (online, nur fuer dich, ein Passwort).
+Lokal testen:  streamlit run app.py   (mit .streamlit/secrets.toml)
+"""
+from datetime import date, datetime
+
+import pandas as pd
+import streamlit as st
+
+import store
+import ai
+
+st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide")
+
+st.markdown("""<style>
+  .block-container{padding-top:2rem;max-width:1200px}
+  [data-testid="stMetricValue"]{font-size:1.5rem}
+  h1,h2,h3{letter-spacing:-.01em}
+</style>""", unsafe_allow_html=True)
+
+
+# ======================================================================
+#  Login (ein Passwort)
+# ======================================================================
+def _secret(name):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    import os
+    return os.environ.get(name)
+
+
+def require_login():
+    if st.session_state.get("auth"):
+        return
+    st.title("🔒 Trading Journal")
+    pw = st.text_input("Passwort", type="password")
+    if st.button("Einloggen"):
+        if pw and pw == _secret("APP_PASSWORD"):
+            st.session_state["auth"] = True
+            st.rerun()
+        else:
+            st.error("Passwort falsch.")
+    st.stop()
+
+
+require_login()
+store.seed_defaults()
+
+
+# ======================================================================
+#  Helfer
+# ======================================================================
+def compute_pnl(direction, entry, exit_, qty):
+    if None in (entry, exit_, qty):
+        return None
+    return round((entry - exit_) * qty, 2) if direction == "Short" else round((exit_ - entry) * qty, 2)
+
+
+def compute_r(pnl, entry, stop, qty):
+    if None in (pnl, entry, stop, qty):
+        return None
+    risk = abs(entry - stop) * qty
+    return round(pnl / risk, 2) if risk > 0 else None
+
+
+def compute_pips(symbol, direction, entry, exit_):
+    """Best-effort Pips fuer FX-aehnliche Paare."""
+    if None in (entry, exit_) or not symbol:
+        return None
+    s = symbol.upper().replace("/", "")
+    if len(s) < 6:           # nur fuer Waehrungspaare
+        return None
+    pip = 0.01 if "JPY" in s else 0.0001
+    diff = (exit_ - entry) if direction != "Short" else (entry - exit_)
+    return round(diff / pip, 1)
+
+
+def trades_df(account_id):
+    rows = store.list_trades(account_id)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["dt"] = pd.to_datetime(df.get("closed_at"), errors="coerce")
+    if "created_at" in df:
+        df["dt"] = df["dt"].fillna(pd.to_datetime(df["created_at"], errors="coerce"))
+    return df
+
+
+def stats(closed):
+    s = {}
+    wins = closed[closed["pnl"] > 0]; losses = closed[closed["pnl"] < 0]
+    s["n"] = len(closed); s["net"] = closed["pnl"].sum()
+    s["win_rate"] = len(wins)/len(closed)*100 if len(closed) else 0
+    s["avg_win"] = wins["pnl"].mean() if len(wins) else 0
+    s["avg_loss"] = losses["pnl"].mean() if len(losses) else 0
+    ls = losses["pnl"].sum()
+    s["pf"] = (wins["pnl"].sum()/abs(ls)) if ls != 0 else float("inf")
+    s["exp"] = closed["pnl"].mean() if len(closed) else 0
+    s["avg_r"] = closed["pnl_r"].dropna().mean() if "pnl_r" in closed else None
+    s["wins"], s["losses"] = len(wins), len(losses)
+    chron = closed.sort_values("dt"); eq = chron["pnl"].cumsum()
+    s["max_dd"] = (eq.cummax()-eq).max() if len(eq) else 0
+    bw = bl = cur = last = 0
+    for p in chron["pnl"]:
+        sign = 1 if p > 0 else (-1 if p < 0 else 0)
+        cur = cur+sign if sign == last else sign; last = sign
+        bw = max(bw, cur); bl = min(bl, cur)
+    s["sw"], s["sl"] = bw, abs(bl)
+    return s
+
+
+def acct_id():
+    return st.session_state.get("acct_id")
+
+
+# ======================================================================
+#  Trade-Formular (Einzel + Stapel)
+# ======================================================================
+def trade_form(prefix, prefill, setups, mistakes, rules, account_id, upload=None):
+    def pv(k, d=None):
+        v = prefill.get(k); return v if v not in (None, "") else d
+
+    with st.form(f"f_{prefix}"):
+        c1, c2, c3 = st.columns(3)
+        symbol = c1.text_input("Symbol (z.B. EURUSD)", value=pv("symbol", ""), key=f"sy{prefix}")
+        direction = c2.selectbox("Richtung", ["Long", "Short"],
+                                 index=0 if str(pv("direction", "Long")).lower().startswith("l") else 1, key=f"di{prefix}")
+        setup = c3.selectbox("Setup", setups or ["Sonstiges"], key=f"se{prefix}")
+
+        c4, c5, c6, c7 = st.columns(4)
+        entry = c4.number_input("Entry", value=float(pv("entry_price", 0.0)), format="%.6f", key=f"en{prefix}")
+        exit_ = c5.number_input("Exit", value=float(pv("exit_price", 0.0)), format="%.6f", key=f"ex{prefix}")
+        stop = c6.number_input("Stop", value=float(pv("stop_price", 0.0)), format="%.6f", key=f"st{prefix}")
+        qty = c7.number_input("Lots / Groesse", value=float(pv("quantity", 0.0)), format="%.4f", key=f"qt{prefix}")
+
+        c8, c9 = st.columns(2)
+        pnl_manual = c8.number_input("P/L (0 = automatisch)", value=float(pv("pnl", 0.0)), format="%.2f", key=f"pn{prefix}")
+        closed_d = c9.date_input("Datum", value=date.today(), key=f"cd{prefix}")
+
+        c10, c11 = st.columns(2)
+        emo = c10.selectbox("Emotion", ["—"] + store.EMOTIONS, key=f"em{prefix}")
+        rating = c11.slider("Ausfuehrung 1–5", 1, 5, 3, key=f"ra{prefix}")
+
+        sel_m = st.multiselect("Fehler-Tags", mistakes, key=f"mi{prefix}")
+        sel_rules = st.multiselect("Eingehaltene Regeln", rules, default=rules, key=f"ru{prefix}")
+
+        st.caption("Reflexion — Tipp: ins Feld klicken und die Mac-/Chrome-Diktierfunktion nutzen 🎙")
+        r_in = st.text_area("Warum bin ich eingestiegen?", height=70, key=f"ri{prefix}")
+        r_out = st.text_area("Warum / wie habe ich geschlossen?", height=70, key=f"ro{prefix}")
+        r_mng = st.text_area("Wie habe ich den Trade gemanaged?", height=70, key=f"rm{prefix}")
+        notes = st.text_area("Freie Notiz", value=pv("notes", ""), height=70, key=f"no{prefix}")
+
+        submitted = st.form_submit_button("💾 Trade speichern")
+
+    if submitted:
+        e, x, sp, q = entry or None, exit_ or None, stop or None, qty or None
+        pnl = pnl_manual if pnl_manual != 0 else compute_pnl(direction, e, x, q)
+        sym = (symbol or "").strip().upper() or None
+        rec = {
+            "account_id": account_id, "symbol": sym, "direction": direction,
+            "entry_price": e, "exit_price": x, "stop_price": sp, "quantity": q,
+            "pnl": pnl, "pnl_r": compute_r(pnl, e, sp, q),
+            "pips": compute_pips(sym, direction, e, x),
+            "closed_at": closed_d.isoformat(), "setup": setup,
+            "mistakes": sel_m, "rules_followed": sel_rules,
+            "emotion": None if emo == "—" else emo, "rating": rating,
+            "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
+            "management": r_mng.strip() or None, "notes": notes.strip() or None,
+        }
+        if upload is not None:
+            upload.seek(0)
+            rec["image_path"] = store.upload_image(upload.read(), upload.name)
+        store.add_trade(rec)
+        return True
+    return False
+
+
+# ======================================================================
+#  Seiten
+# ======================================================================
+def page_start():
+    st.title("🏠 Meine Konten")
+    cols = st.columns(3)
+    for i, a in enumerate(store.list_accounts()):
+        df = trades_df(a["id"]); closed = df.dropna(subset=["pnl"]) if not df.empty else pd.DataFrame()
+        net = closed["pnl"].sum() if not closed.empty else 0
+        wr = len(closed[closed["pnl"] > 0])/len(closed)*100 if len(closed) else 0
+        with cols[i % 3]:
+            st.subheader(a["name"])
+            st.metric("Netto P/L", f"{net:,.2f} {a.get('currency') or ''}")
+            st.caption(f"Trefferquote {wr:.0f} % · {len(closed)} Trades")
+            if st.button("Öffnen", key=f"op{a['id']}"):
+                st.session_state["acct_id"] = a["id"]; st.session_state["nav"] = "📊 Dashboard"; st.rerun()
+
+
+def page_dashboard():
+    a = next((x for x in store.list_accounts() if x["id"] == acct_id()), None)
+    st.title(f"📊 Dashboard — {a['name'] if a else ''}")
+    df = trades_df(acct_id())
+    if df.empty:
+        st.info("Noch keine Trades in diesem Konto."); return
+    closed = df.dropna(subset=["pnl"]).copy()
+    if closed.empty:
+        st.warning("Trades vorhanden, aber noch ohne P/L."); return
+    s = stats(closed)
+    r1 = st.columns(4)
+    r1[0].metric("Netto P/L", f"{s['net']:,.2f}"); r1[1].metric("Trefferquote", f"{s['win_rate']:.0f} %")
+    r1[2].metric("Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"); r1[3].metric("Trades", s["n"])
+    r2 = st.columns(4)
+    r2[0].metric("Ø Gewinn", f"{s['avg_win']:,.2f}"); r2[1].metric("Ø Verlust", f"{s['avg_loss']:,.2f}")
+    r2[2].metric("Erwartungswert", f"{s['exp']:,.2f}")
+    r2[3].metric("Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R")
+    r3 = st.columns(4)
+    r3[0].metric("Max. Drawdown", f"{s['max_dd']:,.2f}"); r3[1].metric("Längste Gewinnserie", s["sw"])
+    r3[2].metric("Längste Verlustserie", s["sl"]); r3[3].metric("Gewinner / Verlierer", f"{s['wins']} / {s['losses']}")
+
+    # Disziplin: Win-Rate mit vs. ohne alle Regeln
+    rules = store.get_list("rules") or []
+    if rules and "rules_followed" in closed:
+        def all_rules(x): return isinstance(x, list) and all(r in x for r in rules)
+        disc = closed[closed["rules_followed"].apply(all_rules)]
+        indisc = closed[~closed["rules_followed"].apply(all_rules)]
+        wr_d = len(disc[disc["pnl"] > 0])/len(disc)*100 if len(disc) else 0
+        wr_i = len(indisc[indisc["pnl"] > 0])/len(indisc)*100 if len(indisc) else 0
+        st.caption(f"🧭 Disziplin — Trefferquote **mit** allen Regeln: {wr_d:.0f} % ({len(disc)}) · **ohne**: {wr_i:.0f} % ({len(indisc)})")
+
+    st.divider()
+    st.subheader("Equity-Kurve")
+    eq = closed.sort_values("dt").copy(); eq["kumuliert"] = eq["pnl"].cumsum()
+    st.line_chart(eq.set_index(eq["dt"].fillna(pd.RangeIndex(len(eq))))["kumuliert"])
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("P/L nach Setup")
+        bs = closed.groupby("setup")["pnl"].sum().sort_values(ascending=False)
+        if not bs.empty: st.bar_chart(bs)
+    with c2:
+        st.subheader("P/L nach Wochentag")
+        names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+        t = closed.dropna(subset=["dt"]).copy()
+        if not t.empty:
+            t["wd"] = t["dt"].dt.weekday.map(lambda i: names[i])
+            st.bar_chart(t.groupby("wd")["pnl"].sum().reindex(names).dropna())
+
+    st.subheader("Häufigste Fehler")
+    allm = [m for lst in closed["mistakes"] if isinstance(lst, list) for m in lst]
+    st.bar_chart(pd.Series(allm).value_counts()) if allm else st.caption("Noch keine Fehler-Tags.")
+
+
+def page_new():
+    st.title("➕ Neuer Trade")
+    setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []; rules = store.get_list("rules") or []
+    files = st.file_uploader("Screenshot(s) hochladen", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+    if not files:
+        st.caption("Kein Bild? Du kannst alles manuell eintragen.")
+        if trade_form("manual", {}, setups, mistakes, rules, acct_id(), None):
+            st.success("Gespeichert ✔")
+        return
+    saved = st.session_state.setdefault("saved", set())
+    for f in files:
+        with st.expander(f"🖼 {f.name}", expanded=(len(files) == 1)):
+            if f.name in saved:
+                st.success("Bereits gespeichert ✔"); continue
+            st.image(f, width=380)
+            pk = f"pf_{f.name}"
+            if st.button("🤖 Mit KI auslesen", key=f"ai_{f.name}"):
+                with st.spinner("KI liest…"):
+                    try:
+                        f.seek(0); st.session_state[pk] = ai.extract_trade_from_image(f.read(), f.name)
+                        st.success("Erkannt — bitte pruefen.")
+                    except Exception as e:
+                        st.error(f"KI fehlgeschlagen: {e}")
+            if trade_form(f.name, st.session_state.get(pk, {}), setups, mistakes, rules, acct_id(), f):
+                saved.add(f.name); st.success("Gespeichert ✔"); st.rerun()
+
+
+def page_trades():
+    st.title("📋 Alle Trades")
+    rows = store.list_trades(acct_id())
+    if not rows:
+        st.info("Noch keine Trades."); return
+    df = pd.DataFrame(rows)
+    cols = [c for c in ["id", "closed_at", "symbol", "direction", "setup", "pnl", "pips", "pnl_r", "rating"] if c in df]
+    st.dataframe(df[cols], use_container_width=True, hide_index=True)
+    st.divider()
+    sel = st.selectbox("Trade öffnen", [r["id"] for r in rows], format_func=lambda i: f"#{i}")
+    t = store.get_trade(sel)
+    if not t: return
+    left, right = st.columns(2)
+    with left:
+        url = store.image_url(t.get("image_path"))
+        st.image(url, use_container_width=True) if url else st.caption("Kein Screenshot.")
+        st.write(f"**{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')}  \n"
+                 f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
+                 f"P/L **{t.get('pnl')}** · {t.get('pnl_r')} R · {t.get('pips')} Pips")
+        if t.get("ai_setup") is not None:
+            st.markdown(f"**KI-Urteil:** Setup {t['ai_setup']} · Ausführung {t.get('ai_exec')} · Psyche {t.get('ai_psych')}")
+            if t.get("ai_weakness"): st.caption(f"Schwäche: {t['ai_weakness']}")
+            if t.get("ai_tip"): st.caption(f"Tipp: {t['ai_tip']}")
+        if st.button("🤖 KI-Urteil erstellen"):
+            with st.spinner("KI bewertet…"):
+                try:
+                    store.update_trade(sel, ai.score_trade(t)); st.success("Bewertet ✔ — neu laden."); 
+                except Exception as e:
+                    st.error(f"Fehlgeschlagen: {e}")
+    with right:
+        setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []
+        with st.form("edit"):
+            setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
+            sel_m = st.multiselect("Fehler-Tags", mistakes, default=t.get("mistakes") or [])
+            r_in = st.text_area("Warum eingestiegen?", value=t.get("reason_entry") or "", height=70)
+            r_out = st.text_area("Warum/wie geschlossen?", value=t.get("reason_exit") or "", height=70)
+            r_mng = st.text_area("Management?", value=t.get("management") or "", height=70)
+            notes = st.text_area("Notiz", value=t.get("notes") or "", height=80)
+            if st.form_submit_button("💾 Speichern"):
+                store.update_trade(sel, {"setup": setup, "mistakes": sel_m,
+                    "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
+                    "management": r_mng.strip() or None, "notes": notes.strip() or None})
+                st.success("Aktualisiert ✔")
+        if st.button("🗑 Löschen"):
+            store.delete_trade(sel); st.warning("Gelöscht — neu laden.")
+
+
+def page_coach():
+    st.title("🧠 KI-Coach")
+    rows = store.list_trades(acct_id())
+    if not rows:
+        st.info("Noch keine Trades."); return
+    st.subheader("Frag dein Journal")
+    q = st.text_input("z.B. Wie ist meine Trefferquote bei EURUSD vormittags?")
+    if st.button("Fragen") and q:
+        with st.spinner("KI denkt…"):
+            try: st.markdown(ai.ask_journal(q, rows))
+            except Exception as e: st.error(f"Fehlgeschlagen: {e}")
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Review")
+        n = st.slider("Letzte … Trades", 3, max(3, len(rows)), min(20, len(rows)))
+        if st.button("Auswertung starten"):
+            with st.spinner("KI analysiert…"):
+                try: st.markdown(ai.review(rows[:n]))
+                except Exception as e: st.error(f"Fehlgeschlagen: {e}")
+    with c2:
+        st.subheader("Coach-Profil")
+        st.markdown(store.get_coach_profile() or "_Noch leer._")
+        if st.button("Profil aktualisieren"):
+            with st.spinner("KI aktualisiert…"):
+                try:
+                    new = ai.refine_coach_profile(store.get_coach_profile(), rows[:30])
+                    store.set_coach_profile(new); st.success("Aktualisiert ✔ — neu laden.")
+                except Exception as e: st.error(f"Fehlgeschlagen: {e}")
+
+
+def page_settings():
+    st.title("⚙️ Einstellungen")
+    st.subheader("Konten")
+    for a in store.list_accounts():
+        c1, c2 = st.columns([4, 1]); c1.write(f"**{a['name']}** ({a.get('currency') or 'EUR'})")
+        if c2.button("Löschen", key=f"da{a['id']}"): store.delete_account(a["id"]); st.rerun()
+    with st.form("aacc"):
+        c1, c2 = st.columns([3, 1]); nm = c1.text_input("Neues Konto"); cu = c2.text_input("Währung", value="EUR")
+        if st.form_submit_button("➕ Konto anlegen") and nm.strip(): store.add_account(nm, cu); st.rerun()
+    st.divider()
+    for label, key in [("Setups", "setups"), ("Fehler-Tags", "mistakes"), ("Regeln", "rules")]:
+        st.subheader(label); items = store.get_list(key) or []
+        st.write(" · ".join(items) if items else "—")
+        c1, c2 = st.columns(2)
+        nw = c1.text_input(f"Neu ({label})", key=f"n{key}")
+        if c1.button("➕", key=f"a{key}") and nw.strip(): store.add_to_list(key, nw); st.rerun()
+        rm = c2.selectbox(f"Entfernen ({label})", ["—"] + items, key=f"r{key}")
+        if c2.button("➖", key=f"rb{key}") and rm != "—": store.remove_from_list(key, rm); st.rerun()
+        st.divider()
+
+
+# ======================================================================
+#  Navigation
+# ======================================================================
+accts = store.list_accounts()
+if "acct_id" not in st.session_state and accts:
+    st.session_state["acct_id"] = accts[0]["id"]
+
+st.sidebar.title("📈 Trading Journal")
+if accts:
+    ids = [a["id"] for a in accts]; names = {a["id"]: a["name"] for a in accts}
+    st.sidebar.selectbox("Aktives Konto", ids, format_func=lambda i: names[i], key="acct_id")
+
+PAGES = {"🏠 Start": page_start, "📊 Dashboard": page_dashboard, "➕ Neuer Trade": page_new,
+         "📋 Alle Trades": page_trades, "🧠 KI-Coach": page_coach, "⚙️ Einstellungen": page_settings}
+st.sidebar.radio("Navigation", list(PAGES.keys()), key="nav")
+st.sidebar.divider()
+st.sidebar.caption("Daten in der EU · nur für dich")
+if st.sidebar.button("Abmelden"):
+    st.session_state.clear(); st.rerun()
+
+PAGES[st.session_state.get("nav", "🏠 Start")]()
