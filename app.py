@@ -193,7 +193,9 @@ def page_start():
             st.metric("Netto P/L", f"{net:,.2f} {a.get('currency') or ''}")
             st.caption(f"Trefferquote {wr:.0f} % · {len(closed)} Trades")
             if st.button("Öffnen", key=f"op{a['id']}"):
-                st.session_state["acct_id"] = a["id"]; st.session_state["nav"] = "📊 Dashboard"; st.rerun()
+                st.session_state["pending_acct"] = a["id"]
+                st.session_state["go_dashboard"] = True
+                st.rerun()
 
 
 def page_dashboard():
@@ -380,20 +382,32 @@ def page_settings():
 #  Navigation
 # ======================================================================
 accts = store.list_accounts()
+
+# WICHTIG: Merker eines vorherigen Klicks anwenden, BEVOR die Bedienelemente
+# (Konto-Auswahl + Navigation) gebaut werden. Nur so laesst Streamlit die
+# Aenderung von aktivem Konto / Seite zu.
+if "pending_acct" in st.session_state:
+    st.session_state["acct_id"] = st.session_state.pop("pending_acct")
+if st.session_state.pop("go_dashboard", False):
+    st.session_state["nav"] = "📊 Dashboard"
+
 if "acct_id" not in st.session_state and accts:
     st.session_state["acct_id"] = accts[0]["id"]
+if "nav" not in st.session_state:
+    st.session_state["nav"] = "🏠 Start"
+
+PAGES = {"🏠 Start": page_start, "📊 Dashboard": page_dashboard, "➕ Neuer Trade": page_new,
+         "📋 Alle Trades": page_trades, "🧠 KI-Coach": page_coach, "⚙️ Einstellungen": page_settings}
 
 st.sidebar.title("📈 Trading Journal")
 if accts:
     ids = [a["id"] for a in accts]; names = {a["id"]: a["name"] for a in accts}
     st.sidebar.selectbox("Aktives Konto", ids, format_func=lambda i: names[i], key="acct_id")
 
-PAGES = {"🏠 Start": page_start, "📊 Dashboard": page_dashboard, "➕ Neuer Trade": page_new,
-         "📋 Alle Trades": page_trades, "🧠 KI-Coach": page_coach, "⚙️ Einstellungen": page_settings}
 st.sidebar.radio("Navigation", list(PAGES.keys()), key="nav")
 st.sidebar.divider()
 st.sidebar.caption("Daten in der EU · nur für dich")
 if st.sidebar.button("Abmelden"):
     st.session_state.clear(); st.rerun()
 
-PAGES[st.session_state.get("nav", "🏠 Start")]()
+PAGES[st.session_state["nav"]]()
