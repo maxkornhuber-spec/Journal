@@ -173,6 +173,9 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
                                  index=0 if str(pv("direction", "Long")).lower().startswith("l") else 1, key=f"di{prefix}")
         setup = c3.selectbox("Setup", setups or ["Sonstiges"], key=f"se{prefix}")
 
+        status = st.radio("Status", ["Abgeschlossen", "Läuft noch (offen)"], horizontal=True, key=f"stt{prefix}",
+                          help="„Läuft noch“ = Trade ist offen. Er erscheint in der History, zählt aber erst in die Statistik, sobald du ihn abschließt.")
+
         c8, c9 = st.columns(2)
         pnl_manual = c8.number_input("Gewinn / Verlust in € (Minus = Verlust)",
                                      value=float(pv("pnl", 0.0)), format="%.2f", step=1.0, key=f"pn{prefix}",
@@ -202,14 +205,17 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
         submitted = st.form_submit_button("💾 Trade speichern")
 
     if submitted:
+        is_open = status.startswith("Läuft")
         e, x, sp, q = entry or None, exit_ or None, stop or None, qty or None
-        pnl = pnl_manual if pnl_manual != 0 else compute_pnl(direction, e, x, q)
+        pnl = None if is_open else (pnl_manual if pnl_manual != 0 else compute_pnl(direction, e, x, q))
         sym = (symbol or "").strip().upper() or None
         rec = {
             "account_id": account_id, "symbol": sym, "direction": direction,
             "entry_price": e, "exit_price": x, "stop_price": sp, "quantity": q,
-            "pnl": pnl, "pnl_r": compute_r(pnl, e, sp, q),
-            "pips": compute_pips(sym, direction, e, x),
+            "pnl": pnl,
+            "pnl_r": None if is_open else compute_r(pnl, e, sp, q),
+            "pips": None if is_open else compute_pips(sym, direction, e, x),
+            "status": "offen" if is_open else "zu",
             "closed_at": closed_d.isoformat(), "setup": setup,
             "mistakes": sel_m, "rules_followed": sel_rules,
             "emotion": None if emo == "—" else emo, "rating": rating,
@@ -217,7 +223,11 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             "management": r_mng.strip() or None, "notes": notes.strip() or None,
         }
         if image_bytes is not None:
-            rec["image_path"] = store.upload_image(image_bytes, image_name or "trade.png")
+            try:
+                rec["image_path"] = store.upload_image(image_bytes, image_name or "trade.png")
+            except Exception:
+                st.warning("Hinweis: Das Bild konnte nicht gespeichert werden – der Trade wird ohne Bild gesichert. "
+                           "(Lege in Supabase unter Storage einen Bucket namens 'screenshots' an, dann werden Bilder mitgespeichert.)")
         store.add_trade(rec)
         return True
     return False
@@ -390,7 +400,11 @@ def page_trades():
     if not rows:
         st.info("Noch keine Trades."); return
     df = pd.DataFrame(rows)
-    cols = [c for c in ["id", "closed_at", "symbol", "direction", "setup", "pnl", "pips", "pnl_r", "rating"] if c in df]
+    if "status" in df:
+        df["Status"] = df["status"].map(lambda s: "🟡 läuft" if s == "offen" else "✅ zu")
+    else:
+        df["Status"] = "✅ zu"
+    cols = [c for c in ["id", "closed_at", "symbol", "direction", "setup", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
     st.divider()
     sel = st.selectbox("Trade öffnen", [r["id"] for r in rows], format_func=lambda i: f"#{i}")
@@ -400,7 +414,8 @@ def page_trades():
     with left:
         url = store.image_url(t.get("image_path"))
         st.image(url, use_container_width=True) if url else st.caption("Kein Screenshot.")
-        st.write(f"**{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')}  \n"
+        badge = "🟡 läuft noch" if t.get("status") == "offen" else "✅ abgeschlossen"
+        st.write(f"**{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}  \n"
                  f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
                  f"P/L **{t.get('pnl')}** · {t.get('pnl_r')} R · {t.get('pips')} Pips")
         if t.get("ai_setup") is not None:
@@ -415,7 +430,14 @@ def page_trades():
                     st.error(f"Fehlgeschlagen: {e}")
     with right:
         setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []
+        is_open_now = (t.get("status") == "offen")
         with st.form("edit"):
+            if is_open_now:
+                st.info("Dieser Trade läuft noch. Trag unten das Ergebnis ein und stell auf „Abgeschlossen“, um ihn in die Statistik zu übernehmen.")
+            new_status = st.radio("Status", ["Abgeschlossen", "Läuft noch (offen)"],
+                                  index=1 if is_open_now else 0, horizontal=True)
+            new_pnl = st.number_input("Gewinn / Verlust in € (Minus = Verlust)",
+                                      value=float(t.get("pnl") or 0.0), format="%.2f", step=1.0)
             setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
             sel_m = st.multiselect("Fehler-Tags", mistakes, default=t.get("mistakes") or [])
             r_in = st.text_area("Warum eingestiegen?", value=t.get("reason_entry") or "", height=70)
@@ -423,10 +445,13 @@ def page_trades():
             r_mng = st.text_area("Management?", value=t.get("management") or "", height=70)
             notes = st.text_area("Notiz", value=t.get("notes") or "", height=80)
             if st.form_submit_button("💾 Speichern"):
+                will_open = new_status.startswith("Läuft")
                 store.update_trade(sel, {"setup": setup, "mistakes": sel_m,
+                    "status": "offen" if will_open else "zu",
+                    "pnl": None if will_open else new_pnl,
                     "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
                     "management": r_mng.strip() or None, "notes": notes.strip() or None})
-                st.success("Aktualisiert ✔")
+                st.success("Aktualisiert ✔ — neu laden.")
         if st.button("🗑 Löschen"):
             store.delete_trade(sel); st.warning("Gelöscht — neu laden.")
 
