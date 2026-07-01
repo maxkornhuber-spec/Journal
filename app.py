@@ -4,6 +4,7 @@ Lokal testen:  streamlit run app.py   (mit .streamlit/secrets.toml)
 """
 from datetime import date, datetime
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -160,7 +161,7 @@ def symbol_field(prefix, prefill_symbol):
 # ======================================================================
 #  Trade-Formular (Einzel + Stapel)
 # ======================================================================
-def trade_form(prefix, prefill, setups, mistakes, rules, account_id, upload=None):
+def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes=None, image_name=None):
     def pv(k, d=None):
         v = prefill.get(k); return v if v not in (None, "") else d
 
@@ -215,9 +216,8 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, upload=None
             "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
             "management": r_mng.strip() or None, "notes": notes.strip() or None,
         }
-        if upload is not None:
-            upload.seek(0)
-            rec["image_path"] = store.upload_image(upload.read(), upload.name)
+        if image_bytes is not None:
+            rec["image_path"] = store.upload_image(image_bytes, image_name or "trade.png")
         store.add_trade(rec)
         return True
     return False
@@ -245,11 +245,25 @@ def page_start():
                 st.rerun()
 
 
+def dashboard_dropzone():
+    nonce = st.session_state.get("dropnonce", 0)
+    drop = st.file_uploader("📥 Trade-Screenshot hier reinziehen — bringt dich direkt zur Eingabe",
+                            type=["png", "jpg", "jpeg", "webp"], key=f"dashdrop{nonce}")
+    if drop is not None:
+        drop.seek(0)
+        st.session_state["incoming_img"] = {"name": drop.name, "bytes": drop.read()}
+        st.session_state["dropnonce"] = nonce + 1
+        st.session_state["go_new"] = True
+        st.rerun()
+
+
 def page_dashboard():
     a = next((x for x in store.list_accounts() if x["id"] == acct_id()), None)
     st.title(f"📊 Dashboard — {a['name'] if a else ''}")
     cur = (a.get("currency") if a else "") or ""
     start_bal = (a.get("start_balance") if a else 0) or 0
+
+    dashboard_dropzone()
 
     df = trades_df(acct_id())
     closed = df.dropna(subset=["pnl"]).copy() if not df.empty else pd.DataFrame()
@@ -261,7 +275,7 @@ def page_dashboard():
         r[1].metric("Netto P/L", f"0.00 {cur}")
         r[2].metric("Trefferquote", "0 %")
         r[3].metric("Trades", "0")
-        st.info("Noch keine Trades mit Ergebnis. Leg unter **➕ Neuer Trade** los – die Übersicht füllt sich dann automatisch.")
+        st.info("Noch keine Trades mit Ergebnis. Zieh oben einen Screenshot rein oder geh auf **➕ Neuer Trade**.")
         return
 
     s = stats(closed)
@@ -276,9 +290,29 @@ def page_dashboard():
     r2[1].metric("Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}")
     r2[2].metric("Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R")
     r2[3].metric("Max. Drawdown", f"{s['max_dd']:,.2f} {cur}")
-    r3 = st.columns(4)
-    r3[0].metric("Ø Gewinn", f"{s['avg_win']:,.2f}"); r3[1].metric("Ø Verlust", f"{s['avg_loss']:,.2f}")
-    r3[2].metric("Längste Gewinnserie", s["sw"]); r3[3].metric("Längste Verlustserie", s["sl"])
+
+    st.divider()
+    col_eq, col_donut = st.columns([2, 1])
+    with col_eq:
+        st.subheader("Verlauf (Equity-Kurve)")
+        eq = closed.sort_values("dt").reset_index(drop=True).copy()
+        eq["kumuliert"] = eq["pnl"].cumsum()
+        eq["Trade"] = range(1, len(eq) + 1)
+        base = alt.Chart(eq).encode(
+            x=alt.X("Trade:Q", title=None),
+            y=alt.Y("kumuliert:Q", title="Kumuliert"))
+        area = base.mark_area(opacity=0.15, color="#2FB67A")
+        line = base.mark_line(color="#2FB67A", strokeWidth=2)
+        st.altair_chart(area + line, use_container_width=True)
+    with col_donut:
+        st.subheader("Gewinner / Verlierer")
+        dd = pd.DataFrame({"Ergebnis": ["Gewinner", "Verlierer"], "Anzahl": [s["wins"], s["losses"]]})
+        donut = alt.Chart(dd).mark_arc(innerRadius=55).encode(
+            theta="Anzahl:Q",
+            color=alt.Color("Ergebnis:N",
+                            scale=alt.Scale(domain=["Gewinner", "Verlierer"], range=["#2FB67A", "#E0635C"]),
+                            legend=alt.Legend(title=None, orient="bottom")))
+        st.altair_chart(donut, use_container_width=True)
 
     # Disziplin: Win-Rate mit vs. ohne alle Regeln
     rules = store.get_list("rules") or []
@@ -289,11 +323,6 @@ def page_dashboard():
         wr_d = len(disc[disc["pnl"] > 0])/len(disc)*100 if len(disc) else 0
         wr_i = len(indisc[indisc["pnl"] > 0])/len(indisc)*100 if len(indisc) else 0
         st.caption(f"🧭 Disziplin — Trefferquote **mit** allen Regeln: {wr_d:.0f} % ({len(disc)}) · **ohne**: {wr_i:.0f} % ({len(indisc)})")
-
-    st.divider()
-    st.subheader("Equity-Kurve")
-    eq = closed.sort_values("dt").copy(); eq["kumuliert"] = eq["pnl"].cumsum()
-    st.line_chart(eq.set_index(eq["dt"].fillna(pd.RangeIndex(len(eq))))["kumuliert"])
 
     c1, c2 = st.columns(2)
     with c1:
@@ -316,29 +345,43 @@ def page_dashboard():
 def page_new():
     st.title("➕ Neuer Trade")
     setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []; rules = store.get_list("rules") or []
+
+    # Quellen sammeln: vom Dashboard reingezogenes Bild + hochgeladene Dateien
+    sources = []
+    inc = st.session_state.get("incoming_img")
+    if inc:
+        sources.append((inc["name"], inc["bytes"]))
     files = st.file_uploader("📎 Screenshot(s) hierher ziehen oder auswählen",
                              type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
-    if not files:
+    for f in files or []:
+        f.seek(0); sources.append((f.name, f.read()))
+
+    if not sources:
         st.caption("Kein Bild? Du kannst alles manuell eintragen.")
-        if trade_form("manual", {}, setups, mistakes, rules, acct_id(), None):
+        if trade_form("manual", {}, setups, mistakes, rules, acct_id()):
             st.success("Gespeichert ✔")
         return
+
     saved = st.session_state.setdefault("saved", set())
-    for f in files:
-        with st.expander(f"🖼 {f.name}", expanded=(len(files) == 1)):
-            if f.name in saved:
+    for name, data in sources:
+        with st.expander(f"🖼 {name}", expanded=(len(sources) == 1)):
+            if name in saved:
                 st.success("Bereits gespeichert ✔"); continue
-            st.image(f, width=380)
-            pk = f"pf_{f.name}"
-            if st.button("🤖 Mit KI auslesen", key=f"ai_{f.name}"):
+            st.image(data, width=380)
+            pk = f"pf_{name}"
+            if st.button("🤖 Mit KI auslesen", key=f"ai_{name}"):
                 with st.spinner("KI liest…"):
                     try:
-                        f.seek(0); st.session_state[pk] = ai.extract_trade_from_image(f.read(), f.name)
+                        st.session_state[pk] = ai.extract_trade_from_image(data, name)
                         st.success("Erkannt — bitte pruefen.")
                     except Exception as e:
                         st.error(f"KI fehlgeschlagen: {e}")
-            if trade_form(f.name, st.session_state.get(pk, {}), setups, mistakes, rules, acct_id(), f):
-                saved.add(f.name); st.success("Gespeichert ✔"); st.rerun()
+            if trade_form(name, st.session_state.get(pk, {}), setups, mistakes, rules, acct_id(),
+                          image_bytes=data, image_name=name):
+                saved.add(name)
+                if inc and name == inc["name"]:
+                    st.session_state.pop("incoming_img", None)
+                st.success("Gespeichert ✔"); st.rerun()
 
 
 def page_trades():
@@ -462,6 +505,8 @@ if "pending_acct" in st.session_state:
     st.session_state["acct_id"] = st.session_state.pop("pending_acct")
 if st.session_state.pop("go_dashboard", False):
     st.session_state["nav"] = "📊 Dashboard"
+if st.session_state.pop("go_new", False):
+    st.session_state["nav"] = "➕ Neuer Trade"
 
 if "acct_id" not in st.session_state and accts:
     st.session_state["acct_id"] = accts[0]["id"]
