@@ -14,8 +14,25 @@ st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide"
 
 st.markdown("""<style>
   .block-container{padding-top:2rem;max-width:1200px}
-  [data-testid="stMetricValue"]{font-size:1.5rem}
-  h1,h2,h3{letter-spacing:-.01em}
+  h1,h2,h3{letter-spacing:-.02em;font-weight:700}
+  /* Kennzahlen als Karten */
+  [data-testid="stMetric"]{
+    background:#1B2734;border:1px solid #27333F;border-radius:14px;
+    padding:14px 16px 12px;
+  }
+  [data-testid="stMetricValue"]{font-size:1.5rem;font-weight:700}
+  [data-testid="stMetricLabel"]{color:#8A99A8}
+  /* Akzent: Buttons in Gold */
+  .stButton>button{
+    border-radius:10px;border:1px solid #3a3320;background:#E7AE5C;color:#1a1408;
+    font-weight:600;
+  }
+  .stButton>button:hover{background:#f0bd73;border-color:#E7AE5C;color:#1a1408}
+  /* Upload-Feld deutlicher */
+  [data-testid="stFileUploaderDropzone"]{
+    border:1.5px dashed #3a4a58;border-radius:12px;background:#18222e;
+  }
+  section[data-testid="stSidebar"]{border-right:1px solid #27333F}
 </style>""", unsafe_allow_html=True)
 
 
@@ -116,6 +133,30 @@ def acct_id():
     return st.session_state.get("acct_id")
 
 
+# Gängige Symbole zum Auswählen (kein Tippen nötig)
+PAIRS = [
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD", "NZD/USD",
+    "EUR/GBP", "EUR/JPY", "EUR/CHF", "EUR/AUD", "EUR/CAD", "GBP/JPY", "GBP/CHF",
+    "AUD/JPY", "CAD/JPY", "CHF/JPY", "NZD/JPY", "AUD/NZD", "GBP/AUD", "GBP/CAD",
+    "XAU/USD", "XAG/USD", "WTI/USD", "US30", "US100", "US500", "GER40", "UK100",
+    "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD",
+]
+
+
+def symbol_field(prefix, prefill_symbol):
+    """Symbol per Auswahl (KI-Vorschlag vorausgewählt) ODER manuell im zweiten Feld."""
+    norm = (prefill_symbol or "").upper().replace("/", "").replace(" ", "")
+    match = next((p for p in PAIRS if p.replace("/", "") == norm), None)
+    opts = ["— auswählen —"] + PAIRS
+    idx = opts.index(match) if match else 0
+    sel = st.selectbox("Symbol", opts, index=idx, key=f"symsel{prefix}")
+    manual = st.text_input("… oder manuell eingeben", value=("" if match else (prefill_symbol or "")),
+                           key=f"symman{prefix}", placeholder="z.B. EURUSD")
+    if manual.strip():
+        return manual.strip().upper()
+    return None if sel == "— auswählen —" else sel
+
+
 # ======================================================================
 #  Trade-Formular (Einzel + Stapel)
 # ======================================================================
@@ -125,20 +166,24 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, upload=None
 
     with st.form(f"f_{prefix}"):
         c1, c2, c3 = st.columns(3)
-        symbol = c1.text_input("Symbol (z.B. EURUSD)", value=pv("symbol", ""), key=f"sy{prefix}")
+        with c1:
+            symbol = symbol_field(prefix, pv("symbol", ""))
         direction = c2.selectbox("Richtung", ["Long", "Short"],
                                  index=0 if str(pv("direction", "Long")).lower().startswith("l") else 1, key=f"di{prefix}")
         setup = c3.selectbox("Setup", setups or ["Sonstiges"], key=f"se{prefix}")
 
+        c8, c9 = st.columns(2)
+        pnl_manual = c8.number_input("Gewinn / Verlust in € (Minus = Verlust)",
+                                     value=float(pv("pnl", 0.0)), format="%.2f", step=1.0, key=f"pn{prefix}",
+                                     help="Trag hier einfach dein Ergebnis ein. Lässt du 0 stehen und füllst Entry/Exit/Lots aus, wird es automatisch berechnet.")
+        closed_d = c9.date_input("Datum", value=date.today(), key=f"cd{prefix}")
+
+        st.caption("Optional: Kurse für automatische Berechnung von P/L, R und Pips")
         c4, c5, c6, c7 = st.columns(4)
         entry = c4.number_input("Entry", value=float(pv("entry_price", 0.0)), format="%.6f", key=f"en{prefix}")
         exit_ = c5.number_input("Exit", value=float(pv("exit_price", 0.0)), format="%.6f", key=f"ex{prefix}")
         stop = c6.number_input("Stop", value=float(pv("stop_price", 0.0)), format="%.6f", key=f"st{prefix}")
         qty = c7.number_input("Lots / Groesse", value=float(pv("quantity", 0.0)), format="%.4f", key=f"qt{prefix}")
-
-        c8, c9 = st.columns(2)
-        pnl_manual = c8.number_input("P/L (0 = automatisch)", value=float(pv("pnl", 0.0)), format="%.2f", key=f"pn{prefix}")
-        closed_d = c9.date_input("Datum", value=date.today(), key=f"cd{prefix}")
 
         c10, c11 = st.columns(2)
         emo = c10.selectbox("Emotion", ["—"] + store.EMOTIONS, key=f"em{prefix}")
@@ -189,8 +234,10 @@ def page_start():
         net = closed["pnl"].sum() if not closed.empty else 0
         wr = len(closed[closed["pnl"] > 0])/len(closed)*100 if len(closed) else 0
         with cols[i % 3]:
+            cur = a.get("currency") or ""
+            bal = (a.get("start_balance") or 0) + net
             st.subheader(a["name"])
-            st.metric("Netto P/L", f"{net:,.2f} {a.get('currency') or ''}")
+            st.metric("Kontostand", f"{bal:,.2f} {cur}", delta=f"{net:,.2f} {cur}")
             st.caption(f"Trefferquote {wr:.0f} % · {len(closed)} Trades")
             if st.button("Öffnen", key=f"op{a['id']}"):
                 st.session_state["pending_acct"] = a["id"]
@@ -201,23 +248,37 @@ def page_start():
 def page_dashboard():
     a = next((x for x in store.list_accounts() if x["id"] == acct_id()), None)
     st.title(f"📊 Dashboard — {a['name'] if a else ''}")
+    cur = (a.get("currency") if a else "") or ""
+    start_bal = (a.get("start_balance") if a else 0) or 0
+
     df = trades_df(acct_id())
-    if df.empty:
-        st.info("Noch keine Trades in diesem Konto."); return
-    closed = df.dropna(subset=["pnl"]).copy()
+    closed = df.dropna(subset=["pnl"]).copy() if not df.empty else pd.DataFrame()
+
     if closed.empty:
-        st.warning("Trades vorhanden, aber noch ohne P/L."); return
+        # Übersicht auch ohne Trades anzeigen
+        r = st.columns(4)
+        r[0].metric("Kontostand", f"{start_bal:,.2f} {cur}")
+        r[1].metric("Netto P/L", f"0.00 {cur}")
+        r[2].metric("Trefferquote", "0 %")
+        r[3].metric("Trades", "0")
+        st.info("Noch keine Trades mit Ergebnis. Leg unter **➕ Neuer Trade** los – die Übersicht füllt sich dann automatisch.")
+        return
+
     s = stats(closed)
-    r1 = st.columns(4)
-    r1[0].metric("Netto P/L", f"{s['net']:,.2f}"); r1[1].metric("Trefferquote", f"{s['win_rate']:.0f} %")
-    r1[2].metric("Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"); r1[3].metric("Trades", s["n"])
+    balance = start_bal + s["net"]
+    r0 = st.columns(4)
+    r0[0].metric("Kontostand", f"{balance:,.2f} {cur}", delta=f"{s['net']:,.2f} {cur}")
+    r0[1].metric("Netto P/L", f"{s['net']:,.2f} {cur}")
+    r0[2].metric("Trefferquote", f"{s['win_rate']:.0f} %")
+    r0[3].metric("Trades", s["n"])
     r2 = st.columns(4)
-    r2[0].metric("Ø Gewinn", f"{s['avg_win']:,.2f}"); r2[1].metric("Ø Verlust", f"{s['avg_loss']:,.2f}")
-    r2[2].metric("Erwartungswert", f"{s['exp']:,.2f}")
-    r2[3].metric("Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R")
+    r2[0].metric("Gewinner / Verlierer", f"{s['wins']} / {s['losses']}")
+    r2[1].metric("Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}")
+    r2[2].metric("Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R")
+    r2[3].metric("Max. Drawdown", f"{s['max_dd']:,.2f} {cur}")
     r3 = st.columns(4)
-    r3[0].metric("Max. Drawdown", f"{s['max_dd']:,.2f}"); r3[1].metric("Längste Gewinnserie", s["sw"])
-    r3[2].metric("Längste Verlustserie", s["sl"]); r3[3].metric("Gewinner / Verlierer", f"{s['wins']} / {s['losses']}")
+    r3[0].metric("Ø Gewinn", f"{s['avg_win']:,.2f}"); r3[1].metric("Ø Verlust", f"{s['avg_loss']:,.2f}")
+    r3[2].metric("Längste Gewinnserie", s["sw"]); r3[3].metric("Längste Verlustserie", s["sl"])
 
     # Disziplin: Win-Rate mit vs. ohne alle Regeln
     rules = store.get_list("rules") or []
@@ -255,7 +316,8 @@ def page_dashboard():
 def page_new():
     st.title("➕ Neuer Trade")
     setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []; rules = store.get_list("rules") or []
-    files = st.file_uploader("Screenshot(s) hochladen", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+    files = st.file_uploader("📎 Screenshot(s) hierher ziehen oder auswählen",
+                             type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
     if not files:
         st.caption("Kein Bild? Du kannst alles manuell eintragen.")
         if trade_form("manual", {}, setups, mistakes, rules, acct_id(), None):
@@ -361,11 +423,21 @@ def page_settings():
     st.title("⚙️ Einstellungen")
     st.subheader("Konten")
     for a in store.list_accounts():
-        c1, c2 = st.columns([4, 1]); c1.write(f"**{a['name']}** ({a.get('currency') or 'EUR'})")
-        if c2.button("Löschen", key=f"da{a['id']}"): store.delete_account(a["id"]); st.rerun()
+        c1, c2, c3 = st.columns([3, 2, 1])
+        c1.write(f"**{a['name']}** ({a.get('currency') or 'EUR'})")
+        new_bal = c2.number_input("Startguthaben", value=float(a.get("start_balance") or 0),
+                                  format="%.2f", step=100.0, key=f"bal{a['id']}")
+        if new_bal != float(a.get("start_balance") or 0):
+            store.update_account(a["id"], {"start_balance": new_bal})
+        if c3.button("Löschen", key=f"da{a['id']}"):
+            store.delete_account(a["id"]); st.rerun()
     with st.form("aacc"):
-        c1, c2 = st.columns([3, 1]); nm = c1.text_input("Neues Konto"); cu = c2.text_input("Währung", value="EUR")
-        if st.form_submit_button("➕ Konto anlegen") and nm.strip(): store.add_account(nm, cu); st.rerun()
+        c1, c2, c3 = st.columns([2, 1, 1])
+        nm = c1.text_input("Neues Konto")
+        cu = c2.text_input("Währung", value="EUR")
+        sb = c3.number_input("Startguthaben", value=0.0, format="%.2f", step=100.0)
+        if st.form_submit_button("➕ Konto anlegen") and nm.strip():
+            store.add_account(nm, cu, sb); st.rerun()
     st.divider()
     for label, key in [("Setups", "setups"), ("Fehler-Tags", "mistakes"), ("Regeln", "rules")]:
         st.subheader(label); items = store.get_list(key) or []

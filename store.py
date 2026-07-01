@@ -48,8 +48,16 @@ def list_accounts():
     return client().table("accounts").select("*").order("id").execute().data or []
 
 
-def add_account(name, currency="EUR"):
-    client().table("accounts").insert({"name": name.strip(), "currency": (currency or "EUR").strip()}).execute()
+def add_account(name, currency="EUR", start_balance=0):
+    client().table("accounts").insert({
+        "name": name.strip(),
+        "currency": (currency or "EUR").strip(),
+        "start_balance": start_balance or 0,
+    }).execute()
+
+
+def update_account(account_id, data: dict):
+    client().table("accounts").update(data).eq("id", account_id).execute()
 
 
 def delete_account(account_id):
