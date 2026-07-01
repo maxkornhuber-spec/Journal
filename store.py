@@ -13,7 +13,7 @@ import time
 import streamlit as st
 from supabase import create_client
 
-BUCKET = "screenshots"
+BUCKET = "Screenshots"
 
 DEFAULT_SETUPS = ["Breakout", "Pullback", "Reversal", "Trend-Following",
                   "Range", "Scalp", "News", "Sonstiges"]
