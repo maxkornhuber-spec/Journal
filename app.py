@@ -139,6 +139,12 @@ def trades_df(account_id):
     df["dt"] = pd.to_datetime(df.get("closed_at"), errors="coerce")
     if "created_at" in df:
         df["dt"] = df["dt"].fillna(pd.to_datetime(df["created_at"], errors="coerce"))
+    df["opened_dt"] = pd.to_datetime(df.get("opened_at"), errors="coerce") if "opened_at" in df else pd.NaT
+    # Haltedauer in Tagen (Ausstieg - Einstieg); bei offenen Trades: heute - Einstieg
+    exit_for_dur = pd.to_datetime(df.get("closed_at"), errors="coerce")
+    today = pd.Timestamp(date.today())
+    end = exit_for_dur.fillna(today)
+    df["haltetage"] = (end - df["opened_dt"]).dt.days
     return df
 
 
@@ -210,12 +216,17 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
 
         status = st.radio("Status", ["Abgeschlossen", "Läuft noch (offen)"], horizontal=True, key=f"stt{prefix}",
                           help="„Läuft noch“ = Trade ist offen. Er erscheint in der History, zählt aber erst in die Statistik, sobald du ihn abschließt.")
+        is_open_ui = status.startswith("Läuft")
 
-        c8, c9 = st.columns(2)
-        pnl_manual = c8.number_input("Gewinn / Verlust in € (Minus = Verlust)",
+        cD1, cD2 = st.columns(2)
+        opened_d = cD1.date_input("Einstiegsdatum", value=date.today(), key=f"od{prefix}")
+        closed_d = cD2.date_input("Ausstiegsdatum", value=date.today(), key=f"cd{prefix}",
+                                  disabled=is_open_ui,
+                                  help="Bei offenen Trades leer lassen — wird beim Abschließen eingetragen.")
+
+        pnl_manual = st.number_input("Gewinn / Verlust in € (Minus = Verlust)",
                                      value=float(pv("pnl", 0.0)), format="%.2f", step=1.0, key=f"pn{prefix}",
                                      help="Trag hier einfach dein Ergebnis ein. Lässt du 0 stehen und füllst Entry/Exit/Lots aus, wird es automatisch berechnet.")
-        closed_d = c9.date_input("Datum", value=date.today(), key=f"cd{prefix}")
 
         st.caption("Optional: Kurse für automatische Berechnung von P/L, R und Pips")
         c4, c5, c6, c7 = st.columns(4)
@@ -251,7 +262,9 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             "pnl_r": None if is_open else compute_r(pnl, e, sp, q),
             "pips": None if is_open else compute_pips(sym, direction, e, x),
             "status": "offen" if is_open else "zu",
-            "closed_at": closed_d.isoformat(), "setup": setup,
+            "opened_at": opened_d.isoformat(),
+            "closed_at": None if is_open else closed_d.isoformat(),
+            "setup": setup,
             "mistakes": sel_m, "rules_followed": sel_rules,
             "emotion": None if emo == "—" else emo, "rating": rating,
             "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
@@ -318,8 +331,10 @@ def page_dashboard():
         if not od.empty:
             parts = []
             for _, o in od.head(6).iterrows():
-                d = str(o.get("closed_at") or "")[:10]
-                parts.append(f"{o.get('symbol') or '—'}" + (f" (seit {d})" if d else ""))
+                d = str(o.get("opened_at") or o.get("closed_at") or "")[:10]
+                tage = o.get("haltetage")
+                seit = f" (seit {d}" + (f", {int(tage)} T" if pd.notna(tage) else "") + ")" if d else ""
+                parts.append(f"{o.get('symbol') or '—'}{seit}")
             st.markdown(f'<div class="openbar">🟡 <b>{len(od)} offen:</b> ' + " · ".join(parts) + '</div>',
                         unsafe_allow_html=True)
 
@@ -471,12 +486,16 @@ def page_trades():
     rows = store.list_trades(acct_id())
     if not rows:
         st.info("Noch keine Trades."); return
-    df = pd.DataFrame(rows)
+    df = trades_df(acct_id())
     if "status" in df:
         df["Status"] = df["status"].map(lambda s: "🟡 läuft" if s == "offen" else "✅ zu")
     else:
         df["Status"] = "✅ zu"
-    cols = [c for c in ["id", "closed_at", "symbol", "direction", "setup", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
+    df["Einstieg"] = df.get("opened_at")
+    df["Ausstieg"] = df.get("closed_at")
+    df["Haltetage"] = df.get("haltetage")
+    cols = [c for c in ["id", "Einstieg", "Ausstieg", "Haltetage", "symbol", "direction",
+                        "setup", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
     st.divider()
     sel = st.selectbox("Trade öffnen", [r["id"] for r in rows], format_func=lambda i: f"#{i}")
@@ -490,7 +509,16 @@ def page_trades():
         else:
             st.caption("Kein Screenshot.")
         badge = "🟡 läuft noch" if t.get("status") == "offen" else "✅ abgeschlossen"
+        dauer = ""
+        if t.get("opened_at"):
+            end = t.get("closed_at") or date.today().isoformat()
+            try:
+                tage = (pd.to_datetime(end) - pd.to_datetime(t["opened_at"])).days
+                dauer = f" · Haltedauer {tage} Tage"
+            except Exception:
+                pass
         st.write(f"**{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}  \n"
+                 f"Einstieg {t.get('opened_at') or '—'} → Ausstieg {t.get('closed_at') or '—'}{dauer}  \n"
                  f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
                  f"P/L **{t.get('pnl')}** · {t.get('pnl_r')} R · {t.get('pips')} Pips")
         if t.get("ai_setup") is not None:
@@ -512,6 +540,16 @@ def page_trades():
                 st.info("Dieser Trade läuft noch. Trag unten das Ergebnis ein und stell auf „Abgeschlossen“, um ihn in die Statistik zu übernehmen.")
             new_status = st.radio("Status", ["Abgeschlossen", "Läuft noch (offen)"],
                                   index=1 if is_open_now else 0, horizontal=True)
+
+            def _parse_d(s):
+                try:
+                    return datetime.fromisoformat(str(s)[:10]).date()
+                except Exception:
+                    return date.today()
+            d1, d2 = st.columns(2)
+            c_open = d1.date_input("Einstiegsdatum", value=_parse_d(t.get("opened_at")))
+            c_close = d2.date_input("Ausstiegsdatum", value=_parse_d(t.get("closed_at")),
+                                    disabled=new_status.startswith("Läuft"))
             e1, e2 = st.columns(2)
             csym = e1.text_input("Symbol", value=t.get("symbol") or "")
             cdir = e2.selectbox("Richtung", ["Long", "Short"],
@@ -539,6 +577,8 @@ def page_trades():
                     "stop_price": cstop or None, "quantity": cq or None,
                     "setup": setup, "mistakes": sel_m,
                     "status": "offen" if will_open else "zu",
+                    "opened_at": c_open.isoformat(),
+                    "closed_at": None if will_open else c_close.isoformat(),
                     "pnl": None if will_open else new_pnl,
                     "pnl_r": None if will_open else compute_r(new_pnl, ce or None, cstop or None, cq or None),
                     "pips": None if will_open else compute_pips(sym, cdir, ce or None, cx or None),
