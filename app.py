@@ -14,27 +14,52 @@ import ai
 st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide")
 
 st.markdown("""<style>
-  .block-container{padding-top:2rem;max-width:1200px}
-  h1{font-size:2rem}
-  h1,h2,h3{letter-spacing:-.02em;font-weight:700}
-  /* Eigene Kennzahl-Karten */
-  .kpi{background:#161F2B;border:1px solid #253140;border-radius:16px;
-       padding:16px 18px;min-height:92px}
-  .kpi-l{color:#8A99A8;font-size:.82rem;font-weight:600;text-transform:uppercase;
-         letter-spacing:.04em;margin-bottom:6px}
-  .kpi-v{font-size:1.7rem;font-weight:800;line-height:1.1}
-  .kpi-s{font-size:.8rem;color:#8A99A8;margin-top:2px}
-  /* Standard-Metriken (Detailseiten) auch als Karten */
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] * { font-family:'Inter', sans-serif !important; }
+
+  /* Streamlit-Chrome ausblenden -> wirkt wie echte App */
+  #MainMenu, header[data-testid="stHeader"], footer, [data-testid="stDecoration"] { display:none !important; }
+
+  .block-container{padding-top:1.6rem;padding-bottom:3rem;max-width:1180px}
+  h1{font-size:1.9rem;font-weight:800;letter-spacing:-.03em;margin-bottom:.2rem}
+  h2,h3{font-weight:700;letter-spacing:-.02em}
+  .stApp{background:#0E1620}
+  hr{margin:1.1rem 0;border-color:#1D2733}
+
+  /* Seitenleiste */
+  section[data-testid="stSidebar"]{background:#0C131C;border-right:1px solid #1D2733}
+  section[data-testid="stSidebar"] div[role="radiogroup"]{gap:4px;margin-top:.3rem}
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label{
+    display:flex;align-items:center;width:100%;padding:9px 12px;border-radius:10px;
+    color:#AEB9C4;font-weight:600;font-size:.95rem;transition:all .12s ease;cursor:pointer}
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover{background:#141E29;color:#E7ECF1}
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child{display:none}
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked){
+    background:linear-gradient(90deg, rgba(231,174,92,.18), rgba(231,174,92,.03));
+    color:#E7AE5C;box-shadow:inset 2px 0 0 #E7AE5C}
+
+  /* Kennzahl-Karten */
+  .kpi{background:linear-gradient(180deg,#18222E,#141C27);border:1px solid #253140;
+       border-radius:16px;padding:16px 18px;min-height:96px}
+  .kpi-l{color:#8494A2;font-size:.72rem;font-weight:700;text-transform:uppercase;
+         letter-spacing:.06em;margin-bottom:8px}
+  .kpi-v{font-size:1.75rem;font-weight:800;line-height:1.05}
+  .kpi-s{font-size:.8rem;color:#8494A2;margin-top:4px}
+
+  /* offene Trades (dezent) */
+  .openbar{background:rgba(231,174,92,.10);border:1px solid rgba(231,174,92,.28);
+    color:#EAD6B4;border-radius:10px;padding:8px 12px;font-size:.9rem;margin:.1rem 0 1rem}
+
+  /* Standard-Metriken (Detailseiten) */
   [data-testid="stMetric"]{background:#161F2B;border:1px solid #253140;border-radius:14px;padding:14px 16px 12px}
-  [data-testid="stMetricValue"]{font-size:1.4rem;font-weight:700}
-  [data-testid="stMetricLabel"]{color:#8A99A8}
-  /* Buttons dezent in Gold */
-  .stButton>button{border-radius:10px;border:1px solid #3a3320;background:#E7AE5C;color:#1a1408;font-weight:600}
-  .stButton>button:hover{background:#f0bd73;border-color:#E7AE5C;color:#1a1408}
-  /* Upload-Feld deutlicher */
-  [data-testid="stFileUploaderDropzone"]{border:1.5px dashed #3a4a58;border-radius:12px;background:#141d28}
-  section[data-testid="stSidebar"]{border-right:1px solid #253140}
-  hr{margin:1.2rem 0;border-color:#253140}
+  [data-testid="stMetricValue"]{font-size:1.4rem;font-weight:800}
+  [data-testid="stMetricLabel"]{color:#8494A2}
+
+  /* Buttons */
+  .stButton>button{border-radius:10px;border:1px solid #3A3320;background:#E7AE5C;color:#1a1408;
+    font-weight:700;padding:.5rem 1rem;transition:all .12s ease}
+  .stButton>button:hover{background:#F1C079;border-color:#E7AE5C;transform:translateY(-1px)}
+  [data-testid="stFileUploaderDropzone"]{border:1.6px dashed #33465A;border-radius:14px;background:#111A24}
 </style>""", unsafe_allow_html=True)
 
 
@@ -286,6 +311,18 @@ def page_dashboard():
     dashboard_dropzone()
 
     df = trades_df(acct_id())
+
+    # Offene Trades kompakt anzeigen (Swing-Erinnerung)
+    if not df.empty and "status" in df.columns:
+        od = df[df["status"] == "offen"]
+        if not od.empty:
+            parts = []
+            for _, o in od.head(6).iterrows():
+                d = str(o.get("closed_at") or "")[:10]
+                parts.append(f"{o.get('symbol') or '—'}" + (f" (seit {d})" if d else ""))
+            st.markdown(f'<div class="openbar">🟡 <b>{len(od)} offen:</b> ' + " · ".join(parts) + '</div>',
+                        unsafe_allow_html=True)
+
     closed = df.dropna(subset=["pnl"]).copy() if not df.empty else pd.DataFrame()
 
     if closed.empty:
