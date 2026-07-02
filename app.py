@@ -15,26 +15,36 @@ st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide"
 
 st.markdown("""<style>
   .block-container{padding-top:2rem;max-width:1200px}
+  h1{font-size:2rem}
   h1,h2,h3{letter-spacing:-.02em;font-weight:700}
-  /* Kennzahlen als Karten */
-  [data-testid="stMetric"]{
-    background:#1B2734;border:1px solid #27333F;border-radius:14px;
-    padding:14px 16px 12px;
-  }
-  [data-testid="stMetricValue"]{font-size:1.5rem;font-weight:700}
+  /* Eigene Kennzahl-Karten */
+  .kpi{background:#161F2B;border:1px solid #253140;border-radius:16px;
+       padding:16px 18px;min-height:92px}
+  .kpi-l{color:#8A99A8;font-size:.82rem;font-weight:600;text-transform:uppercase;
+         letter-spacing:.04em;margin-bottom:6px}
+  .kpi-v{font-size:1.7rem;font-weight:800;line-height:1.1}
+  .kpi-s{font-size:.8rem;color:#8A99A8;margin-top:2px}
+  /* Standard-Metriken (Detailseiten) auch als Karten */
+  [data-testid="stMetric"]{background:#161F2B;border:1px solid #253140;border-radius:14px;padding:14px 16px 12px}
+  [data-testid="stMetricValue"]{font-size:1.4rem;font-weight:700}
   [data-testid="stMetricLabel"]{color:#8A99A8}
-  /* Akzent: Buttons in Gold */
-  .stButton>button{
-    border-radius:10px;border:1px solid #3a3320;background:#E7AE5C;color:#1a1408;
-    font-weight:600;
-  }
+  /* Buttons dezent in Gold */
+  .stButton>button{border-radius:10px;border:1px solid #3a3320;background:#E7AE5C;color:#1a1408;font-weight:600}
   .stButton>button:hover{background:#f0bd73;border-color:#E7AE5C;color:#1a1408}
   /* Upload-Feld deutlicher */
-  [data-testid="stFileUploaderDropzone"]{
-    border:1.5px dashed #3a4a58;border-radius:12px;background:#18222e;
-  }
-  section[data-testid="stSidebar"]{border-right:1px solid #27333F}
+  [data-testid="stFileUploaderDropzone"]{border:1.5px dashed #3a4a58;border-radius:12px;background:#141d28}
+  section[data-testid="stSidebar"]{border-right:1px solid #253140}
+  hr{margin:1.2rem 0;border-color:#253140}
 </style>""", unsafe_allow_html=True)
+
+
+def kpi(col, label, value, tone="neutral", sub=None):
+    color = {"pos": "#2FB67A", "neg": "#E0635C", "neutral": "#E7ECF1", "gold": "#E7AE5C"}[tone]
+    sub_html = f'<div class="kpi-s">{sub}</div>' if sub else ""
+    col.markdown(
+        f'<div class="kpi"><div class="kpi-l">{label}</div>'
+        f'<div class="kpi-v" style="color:{color}">{value}</div>{sub_html}</div>',
+        unsafe_allow_html=True)
 
 
 # ======================================================================
@@ -281,25 +291,27 @@ def page_dashboard():
     if closed.empty:
         # Übersicht auch ohne Trades anzeigen
         r = st.columns(4)
-        r[0].metric("Kontostand", f"{start_bal:,.2f} {cur}")
-        r[1].metric("Netto P/L", f"0.00 {cur}")
-        r[2].metric("Trefferquote", "0 %")
-        r[3].metric("Trades", "0")
+        kpi(r[0], "Kontostand", f"{start_bal:,.2f} {cur}", "gold")
+        kpi(r[1], "Netto P/L", f"0.00 {cur}", "neutral")
+        kpi(r[2], "Trefferquote", "0 %", "neutral")
+        kpi(r[3], "Trades", "0", "neutral")
         st.info("Noch keine Trades mit Ergebnis. Zieh oben einen Screenshot rein oder geh auf **➕ Neuer Trade**.")
         return
 
     s = stats(closed)
     balance = start_bal + s["net"]
+    net_tone = "pos" if s["net"] >= 0 else "neg"
     r0 = st.columns(4)
-    r0[0].metric("Kontostand", f"{balance:,.2f} {cur}", delta=f"{s['net']:,.2f} {cur}")
-    r0[1].metric("Netto P/L", f"{s['net']:,.2f} {cur}")
-    r0[2].metric("Trefferquote", f"{s['win_rate']:.0f} %")
-    r0[3].metric("Trades", s["n"])
+    kpi(r0[0], "Kontostand", f"{balance:,.2f} {cur}", "gold",
+        sub=f"{'▲' if s['net'] >= 0 else '▼'} {s['net']:,.2f} {cur}")
+    kpi(r0[1], "Netto P/L", f"{s['net']:,.2f} {cur}", net_tone)
+    kpi(r0[2], "Trefferquote", f"{s['win_rate']:.0f} %", "neutral")
+    kpi(r0[3], "Trades", f"{s['n']}", "neutral")
     r2 = st.columns(4)
-    r2[0].metric("Gewinner / Verlierer", f"{s['wins']} / {s['losses']}")
-    r2[1].metric("Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}")
-    r2[2].metric("Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R")
-    r2[3].metric("Max. Drawdown", f"{s['max_dd']:,.2f} {cur}")
+    kpi(r2[0], "Gewinner / Verlierer", f"{s['wins']} / {s['losses']}", "neutral")
+    kpi(r2[1], "Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}", "neutral")
+    kpi(r2[2], "Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R", "neutral")
+    kpi(r2[3], "Max. Drawdown", f"{s['max_dd']:,.2f} {cur}", "neg" if s["max_dd"] < 0 else "neutral")
 
     st.divider()
     col_eq, col_donut = st.columns([2, 1])
@@ -308,21 +320,25 @@ def page_dashboard():
         eq = closed.sort_values("dt").reset_index(drop=True).copy()
         eq["kumuliert"] = eq["pnl"].cumsum()
         eq["Trade"] = range(1, len(eq) + 1)
+        up = eq["kumuliert"].iloc[-1] >= 0
+        col = "#2FB67A" if up else "#E0635C"
         base = alt.Chart(eq).encode(
             x=alt.X("Trade:Q", title=None),
-            y=alt.Y("kumuliert:Q", title="Kumuliert"))
-        area = base.mark_area(opacity=0.15, color="#2FB67A")
-        line = base.mark_line(color="#2FB67A", strokeWidth=2)
-        st.altair_chart(area + line, use_container_width=True)
+            y=alt.Y("kumuliert:Q", title=None))
+        area = base.mark_area(opacity=0.14, color=col)
+        line = base.mark_line(color=col, strokeWidth=2.5)
+        st.altair_chart((area + line).properties(height=300), use_container_width=True)
     with col_donut:
         st.subheader("Gewinner / Verlierer")
         dd = pd.DataFrame({"Ergebnis": ["Gewinner", "Verlierer"], "Anzahl": [s["wins"], s["losses"]]})
-        donut = alt.Chart(dd).mark_arc(innerRadius=55).encode(
+        ring = alt.Chart(dd).mark_arc(innerRadius=62, outerRadius=95).encode(
             theta="Anzahl:Q",
             color=alt.Color("Ergebnis:N",
                             scale=alt.Scale(domain=["Gewinner", "Verlierer"], range=["#2FB67A", "#E0635C"]),
                             legend=alt.Legend(title=None, orient="bottom")))
-        st.altair_chart(donut, use_container_width=True)
+        mid = alt.Chart(pd.DataFrame({"t": [f"{s['win_rate']:.0f}%"]})).mark_text(
+            size=30, fontWeight="bold", color="#E7ECF1").encode(text="t:N")
+        st.altair_chart((ring + mid).properties(height=300), use_container_width=True)
 
     # Disziplin: Win-Rate mit vs. ohne alle Regeln
     rules = store.get_list("rules") or []
@@ -334,22 +350,38 @@ def page_dashboard():
         wr_i = len(indisc[indisc["pnl"] > 0])/len(indisc)*100 if len(indisc) else 0
         st.caption(f"🧭 Disziplin — Trefferquote **mit** allen Regeln: {wr_d:.0f} % ({len(disc)}) · **ohne**: {wr_i:.0f} % ({len(indisc)})")
 
+    def signed_bars(data, label_col, title):
+        d = data.reset_index()
+        d.columns = [label_col, "pnl"]
+        d["farbe"] = d["pnl"].apply(lambda v: "Gewinn" if v >= 0 else "Verlust")
+        ch = alt.Chart(d).mark_bar().encode(
+            x=alt.X(f"{label_col}:N", title=None, sort=None),
+            y=alt.Y("pnl:Q", title=None),
+            color=alt.Color("farbe:N",
+                            scale=alt.Scale(domain=["Gewinn", "Verlust"], range=["#2FB67A", "#E0635C"]),
+                            legend=None)).properties(height=260)
+        st.altair_chart(ch, use_container_width=True)
+
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("P/L nach Setup")
         bs = closed.groupby("setup")["pnl"].sum().sort_values(ascending=False)
-        if not bs.empty: st.bar_chart(bs)
+        if not bs.empty: signed_bars(bs, "Setup", "Setup")
     with c2:
         st.subheader("P/L nach Wochentag")
         names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
         t = closed.dropna(subset=["dt"]).copy()
         if not t.empty:
             t["wd"] = t["dt"].dt.weekday.map(lambda i: names[i])
-            st.bar_chart(t.groupby("wd")["pnl"].sum().reindex(names).dropna())
+            wk = t.groupby("wd")["pnl"].sum().reindex(names).dropna()
+            if not wk.empty: signed_bars(wk, "Wochentag", "Wochentag")
 
     st.subheader("Häufigste Fehler")
     allm = [m for lst in closed["mistakes"] if isinstance(lst, list) for m in lst]
-    st.bar_chart(pd.Series(allm).value_counts()) if allm else st.caption("Noch keine Fehler-Tags.")
+    if allm:
+        st.bar_chart(pd.Series(allm).value_counts())
+    else:
+        st.caption("Noch keine Fehler-Tags.")
 
 
 def page_new():
@@ -379,14 +411,17 @@ def page_new():
                 st.success("Bereits gespeichert ✔"); continue
             st.image(data, width=380)
             pk = f"pf_{name}"
+            ver = st.session_state.get(f"ver_{name}", 0)
             if st.button("🤖 Mit KI auslesen", key=f"ai_{name}"):
                 with st.spinner("KI liest…"):
                     try:
                         st.session_state[pk] = ai.extract_trade_from_image(data, name)
-                        st.success("Erkannt — bitte pruefen.")
+                        st.session_state[f"ver_{name}"] = ver + 1   # frische Felder -> Prefill greift
+                        st.toast("KI-Werte übernommen ✔ — bitte prüfen")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"KI fehlgeschlagen: {e}")
-            if trade_form(name, st.session_state.get(pk, {}), setups, mistakes, rules, acct_id(),
+            if trade_form(f"{name}~{ver}", st.session_state.get(pk, {}), setups, mistakes, rules, acct_id(),
                           image_bytes=data, image_name=name):
                 saved.add(name)
                 if inc and name == inc["name"]:
@@ -552,4 +587,4 @@ st.sidebar.caption("Daten in der EU · nur für dich")
 if st.sidebar.button("Abmelden"):
     st.session_state.clear(); st.rerun()
 
-PAGES[st.session_state["nav"]]()
+_ = PAGES[st.session_state["nav"]]()
