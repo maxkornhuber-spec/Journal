@@ -43,7 +43,18 @@ def client():
     return create_client(url, key)
 
 
+# --- Cache-Helfer --------------------------------------------------------
+# Lese-Funktionen werden zwischengespeichert (schnell). Nach jeder Aenderung
+# wird der Cache geleert, damit nie veraltete Daten angezeigt werden.
+def _fresh():
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
 # --- Konten --------------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
 def list_accounts():
     return client().table("accounts").select("*").order("id").execute().data or []
 
@@ -54,17 +65,21 @@ def add_account(name, currency="EUR", start_balance=0):
         "currency": (currency or "EUR").strip(),
         "start_balance": start_balance or 0,
     }).execute()
+    _fresh()
 
 
 def update_account(account_id, data: dict):
     client().table("accounts").update(data).eq("id", account_id).execute()
+    _fresh()
 
 
 def delete_account(account_id):
     client().table("accounts").delete().eq("id", account_id).execute()
+    _fresh()
 
 
 # --- Trades --------------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
 def list_trades(account_id):
     return (client().table("trades").select("*")
             .eq("account_id", account_id).order("id", desc=True).execute().data or [])
@@ -78,18 +93,22 @@ def get_trade(trade_id):
 def add_trade(data: dict):
     clean = {k: v for k, v in data.items() if v is not None}
     r = client().table("trades").insert(clean).execute()
+    _fresh()
     return r.data[0]["id"] if r.data else None
 
 
 def update_trade(trade_id, data: dict):
     client().table("trades").update(data).eq("id", trade_id).execute()
+    _fresh()
 
 
 def delete_trade(trade_id):
     client().table("trades").delete().eq("id", trade_id).execute()
+    _fresh()
 
 
 # --- Eigene Listen -------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
 def get_list(name):
     r = client().table("app_lists").select("items").eq("name", name).limit(1).execute()
     return r.data[0]["items"] if r.data else None
@@ -97,6 +116,7 @@ def get_list(name):
 
 def set_list(name, items):
     client().table("app_lists").upsert({"name": name, "items": items}).execute()
+    _fresh()
 
 
 def add_to_list(name, item):
@@ -128,6 +148,7 @@ def seed_defaults():
 
 
 # --- Coach-Profil --------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
 def get_coach_profile():
     r = client().table("coach_profile").select("content").eq("id", 1).limit(1).execute()
     return r.data[0]["content"] if r.data else ""
@@ -135,6 +156,7 @@ def get_coach_profile():
 
 def set_coach_profile(text):
     client().table("coach_profile").upsert({"id": 1, "content": text}).execute()
+    _fresh()
 
 
 # --- Bilder (Storage) ----------------------------------------------------
