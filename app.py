@@ -448,7 +448,10 @@ def page_trades():
     left, right = st.columns(2)
     with left:
         url = store.image_url(t.get("image_path"))
-        st.image(url, use_container_width=True) if url else st.caption("Kein Screenshot.")
+        if url:
+            st.image(url, use_container_width=True)
+        else:
+            st.caption("Kein Screenshot.")
         badge = "🟡 läuft noch" if t.get("status") == "offen" else "✅ abgeschlossen"
         st.write(f"**{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}  \n"
                  f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
@@ -467,10 +470,21 @@ def page_trades():
         setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []
         is_open_now = (t.get("status") == "offen")
         with st.form("edit"):
+            st.markdown("**Trade bearbeiten**")
             if is_open_now:
                 st.info("Dieser Trade läuft noch. Trag unten das Ergebnis ein und stell auf „Abgeschlossen“, um ihn in die Statistik zu übernehmen.")
             new_status = st.radio("Status", ["Abgeschlossen", "Läuft noch (offen)"],
                                   index=1 if is_open_now else 0, horizontal=True)
+            e1, e2 = st.columns(2)
+            csym = e1.text_input("Symbol", value=t.get("symbol") or "")
+            cdir = e2.selectbox("Richtung", ["Long", "Short"],
+                                index=0 if str(t.get("direction", "Long")).lower().startswith("l") else 1)
+            e3, e4 = st.columns(2)
+            ce = e3.number_input("Entry", value=float(t.get("entry_price") or 0.0), format="%.6f")
+            cx = e4.number_input("Exit", value=float(t.get("exit_price") or 0.0), format="%.6f")
+            e5, e6 = st.columns(2)
+            cstop = e5.number_input("Stop", value=float(t.get("stop_price") or 0.0), format="%.6f")
+            cq = e6.number_input("Lots / Größe", value=float(t.get("quantity") or 0.0), format="%.4f")
             new_pnl = st.number_input("Gewinn / Verlust in € (Minus = Verlust)",
                                       value=float(t.get("pnl") or 0.0), format="%.2f", step=1.0)
             setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
@@ -481,9 +495,16 @@ def page_trades():
             notes = st.text_area("Notiz", value=t.get("notes") or "", height=80)
             if st.form_submit_button("💾 Speichern"):
                 will_open = new_status.startswith("Läuft")
-                store.update_trade(sel, {"setup": setup, "mistakes": sel_m,
+                sym = (csym or "").strip().upper() or None
+                store.update_trade(sel, {
+                    "symbol": sym, "direction": cdir,
+                    "entry_price": ce or None, "exit_price": cx or None,
+                    "stop_price": cstop or None, "quantity": cq or None,
+                    "setup": setup, "mistakes": sel_m,
                     "status": "offen" if will_open else "zu",
                     "pnl": None if will_open else new_pnl,
+                    "pnl_r": None if will_open else compute_r(new_pnl, ce or None, cstop or None, cq or None),
+                    "pips": None if will_open else compute_pips(sym, cdir, ce or None, cx or None),
                     "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
                     "management": r_mng.strip() or None, "notes": notes.strip() or None})
                 st.success("Aktualisiert ✔ — neu laden.")
@@ -571,10 +592,14 @@ if st.session_state.pop("go_new", False):
 if "acct_id" not in st.session_state and accts:
     st.session_state["acct_id"] = accts[0]["id"]
 if "nav" not in st.session_state:
-    st.session_state["nav"] = "🏠 Start"
+    st.session_state["nav"] = "📊 Dashboard"
 
-PAGES = {"🏠 Start": page_start, "📊 Dashboard": page_dashboard, "➕ Neuer Trade": page_new,
+PAGES = {"📊 Dashboard": page_dashboard, "➕ Neuer Trade": page_new,
          "📋 Alle Trades": page_trades, "🧠 KI-Coach": page_coach, "⚙️ Einstellungen": page_settings}
+
+# Falls noch ein alter Zustand (z.B. "Start") gespeichert ist: auf Dashboard zuruecksetzen
+if st.session_state.get("nav") not in PAGES:
+    st.session_state["nav"] = "📊 Dashboard"
 
 st.sidebar.title("📈 Trading Journal")
 if accts:
