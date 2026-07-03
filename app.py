@@ -15,7 +15,10 @@ st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide"
 
 st.markdown("""<style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-  html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] * { font-family:'Inter', sans-serif !important; }
+  html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] { font-family:'Inter', sans-serif; }
+  /* Material-Symbole (z.B. Seitenleisten-Pfeil) NICHT mit Inter ueberschreiben */
+  [data-testid="stIconMaterial"], .material-icons, .material-symbols-rounded, .material-symbols-outlined,
+  span[class*="material-symbols"] { font-family:'Material Symbols Rounded','Material Symbols Outlined','Material Icons' !important; }
 
   /* Streamlit-Chrome ausblenden -> wirkt wie echte App */
   #MainMenu, header[data-testid="stHeader"], footer, [data-testid="stDecoration"] { display:none !important; }
