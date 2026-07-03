@@ -159,6 +159,28 @@ def set_coach_profile(text):
     _fresh()
 
 
+# --- Ein-/Auszahlungen (Kapital) ----------------------------------------
+# amount > 0 = Einzahlung, amount < 0 = Auszahlung. Beeinflusst den
+# Kontostand, aber NICHT die Performance-Kurve (die zeigt nur Trades).
+@st.cache_data(ttl=600, show_spinner=False)
+def list_cashflows(account_id):
+    return (client().table("cashflows").select("*")
+            .eq("account_id", account_id).order("dt").execute().data or [])
+
+
+def add_cashflow(account_id, dt, amount, note=None):
+    client().table("cashflows").insert({
+        "account_id": account_id, "dt": dt,
+        "amount": amount, "note": (note or None),
+    }).execute()
+    _fresh()
+
+
+def delete_cashflow(cid):
+    client().table("cashflows").delete().eq("id", cid).execute()
+    _fresh()
+
+
 # --- Bilder (Storage) ----------------------------------------------------
 def upload_image(data: bytes, filename: str) -> str:
     path = f"{int(time.time()*1000)}_{filename}"

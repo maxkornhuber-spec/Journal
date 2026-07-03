@@ -136,6 +136,8 @@ def trades_df(account_id):
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
+    if "pnl" in df:
+        df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce")
     df["dt"] = pd.to_datetime(df.get("closed_at"), errors="coerce")
     if "created_at" in df:
         df["dt"] = df["dt"].fillna(pd.to_datetime(df["created_at"], errors="coerce"))
@@ -338,45 +340,93 @@ def page_dashboard():
             st.markdown(f'<div class="openbar">🟡 <b>{len(od)} offen:</b> ' + " · ".join(parts) + '</div>',
                         unsafe_allow_html=True)
 
-    closed = df.dropna(subset=["pnl"]).copy() if not df.empty else pd.DataFrame()
+    # Kapital (Ein-/Auszahlungen) des aktiven Kontos
+    cfs = store.list_cashflows(acct_id())
+    deposits_net = sum(float(c.get("amount") or 0) for c in cfs)
 
-    if closed.empty:
-        # Übersicht auch ohne Trades anzeigen
-        r = st.columns(4)
-        kpi(r[0], "Kontostand", f"{start_bal:,.2f} {cur}", "gold")
-        kpi(r[1], "Netto P/L", f"0.00 {cur}", "neutral")
-        kpi(r[2], "Trefferquote", "0 %", "neutral")
-        kpi(r[3], "Trades", "0", "neutral")
+    closed_all = df.dropna(subset=["pnl"]).copy() if not df.empty else pd.DataFrame()
+    total_pnl_all = closed_all["pnl"].sum() if not closed_all.empty else 0
+    balance = start_bal + deposits_net + total_pnl_all   # echter Kontostand (inkl. Einzahlungen)
+
+    # --- Zeitraum-Filter ---
+    period = st.selectbox("Zeitraum", ["Alles", "Diese Woche", "Dieser Monat", "Letzte 30 Tage", "Benutzerdefiniert"],
+                          key="dashperiod")
+    today = pd.Timestamp(date.today()).normalize()
+    start_p, end_p = None, today
+    if period == "Diese Woche":
+        start_p = today - pd.Timedelta(days=today.weekday())
+    elif period == "Dieser Monat":
+        start_p = today.replace(day=1)
+    elif period == "Letzte 30 Tage":
+        start_p = today - pd.Timedelta(days=30)
+    elif period == "Benutzerdefiniert":
+        cc1, cc2 = st.columns(2)
+        d_from = cc1.date_input("Von", value=date.today().replace(day=1), key="pf_from")
+        d_to = cc2.date_input("Bis", value=date.today(), key="pf_to")
+        start_p = pd.Timestamp(d_from).normalize(); end_p = pd.Timestamp(d_to).normalize()
+
+    # Kontostand-Karte immer gesamt (inkl. Einzahlungen)
+    r0 = st.columns(4)
+    kpi(r0[0], "Kontostand", f"{balance:,.2f} {cur}", "gold",
+        sub=(f"inkl. {deposits_net:,.2f} {cur} Ein-/Auszahlungen" if deposits_net else None))
+
+    if closed_all.empty:
+        kpi(r0[1], "Netto P/L", f"0.00 {cur}", "neutral")
+        kpi(r0[2], "Trefferquote", "0 %", "neutral")
+        kpi(r0[3], "Trades", "0", "neutral")
         st.info("Noch keine Trades mit Ergebnis. Zieh oben einen Screenshot rein oder geh auf **➕ Neuer Trade**.")
         return
 
+    # Zeitraum auf abgeschlossene Trades anwenden
+    if start_p is not None:
+        end_incl = end_p + pd.Timedelta(days=1)
+        m = (closed_all["dt"] >= start_p) & (closed_all["dt"] < end_incl)
+        closed = closed_all[m].copy()
+        pre = closed_all[closed_all["dt"] < start_p]
+        suffix = " (Zeitraum)"
+    else:
+        closed = closed_all.copy()
+        pre = closed_all.iloc[0:0]
+        suffix = ""
+
+    pre_pnl = pre["pnl"].sum() if not pre.empty else 0
+    base_curve = start_bal + pre_pnl   # Startpunkt der Kurve: nur Trades, OHNE Ein-/Auszahlungen
+
+    if closed.empty:
+        kpi(r0[1], "Netto P/L" + suffix, f"0.00 {cur}", "neutral")
+        kpi(r0[2], "Trefferquote", "0 %", "neutral")
+        kpi(r0[3], "Trades", "0", "neutral")
+        st.info("Keine abgeschlossenen Trades in diesem Zeitraum.")
+        return
+
     s = stats(closed)
-    balance = start_bal + s["net"]
     net_tone = "pos" if s["net"] >= 0 else "neg"
-    r0 = st.columns(4)
-    kpi(r0[0], "Kontostand", f"{balance:,.2f} {cur}", "gold",
-        sub=f"{'▲' if s['net'] >= 0 else '▼'} {s['net']:,.2f} {cur}")
-    kpi(r0[1], "Netto P/L", f"{s['net']:,.2f} {cur}", net_tone)
+    kpi(r0[1], "Netto P/L" + suffix, f"{s['net']:,.2f} {cur}", net_tone)
     kpi(r0[2], "Trefferquote", f"{s['win_rate']:.0f} %", "neutral")
     kpi(r0[3], "Trades", f"{s['n']}", "neutral")
     r2 = st.columns(4)
     kpi(r2[0], "Gewinner / Verlierer", f"{s['wins']} / {s['losses']}", "neutral")
     kpi(r2[1], "Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}", "neutral")
     kpi(r2[2], "Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R", "neutral")
-    kpi(r2[3], "Max. Drawdown", f"{s['max_dd']:,.2f} {cur}", "neg" if s["max_dd"] < 0 else "neutral")
+    kpi(r2[3], "Max. Drawdown", ("0.00 " + cur) if s["max_dd"] <= 0 else f"-{s['max_dd']:,.2f} {cur}",
+        "neg" if s["max_dd"] > 0 else "neutral")
 
     st.divider()
     col_eq, col_donut = st.columns([2, 1])
     with col_eq:
-        st.subheader("Verlauf (Equity-Kurve)")
+        st.subheader("Performance-Kurve")
+        st.caption("Kontostand nur aus Trades — Ein-/Auszahlungen sind hier bewusst nicht enthalten.")
         eq = closed.sort_values("dt").reset_index(drop=True).copy()
-        eq["kumuliert"] = eq["pnl"].cumsum()
+        eq["balance"] = base_curve + eq["pnl"].cumsum()
         eq["Trade"] = range(1, len(eq) + 1)
-        up = eq["kumuliert"].iloc[-1] >= 0
-        col = "#2FB67A" if up else "#E0635C"
-        base = alt.Chart(eq).encode(
-            x=alt.X("Trade:Q", title=None),
-            y=alt.Y("kumuliert:Q", title=None))
+        start_row = pd.DataFrame({"Trade": [0], "balance": [base_curve]})
+        eqp = pd.concat([start_row, eq[["Trade", "balance"]]], ignore_index=True)
+        col = "#2FB67A" if eqp["balance"].iloc[-1] >= base_curve else "#E0635C"
+        ymin, ymax = float(eqp["balance"].min()), float(eqp["balance"].max())
+        pad = max((ymax - ymin) * 0.15, abs(ymax) * 0.02, 1.0)
+        base = alt.Chart(eqp).encode(
+            x=alt.X("Trade:Q", title=None, axis=alt.Axis(tickMinStep=1, format="d")),
+            y=alt.Y("balance:Q", title=cur, scale=alt.Scale(domain=[ymin - pad, ymax + pad], nice=False)))
         area = base.mark_area(opacity=0.14, color=col)
         line = base.mark_line(color=col, strokeWidth=2.5)
         st.altair_chart((area + line).properties(height=300), use_container_width=True)
@@ -639,6 +689,35 @@ def page_settings():
         sb = c3.number_input("Startguthaben", value=0.0, format="%.2f", step=100.0)
         if st.form_submit_button("➕ Konto anlegen") and nm.strip():
             store.add_account(nm, cu, sb); st.rerun()
+
+    st.divider()
+    st.subheader("💰 Ein-/Auszahlungen (aktives Konto)")
+    st.caption("Beeinflusst den Kontostand, aber NICHT die Performance-Kurve. "
+               "Einzahlung = positiver Betrag, Auszahlung = negativer Betrag (z. B. -500).")
+    aid = acct_id()
+    if aid:
+        cfs = store.list_cashflows(aid)
+        if cfs:
+            for c in cfs:
+                cc1, cc2, cc3, cc4 = st.columns([2, 2, 3, 1])
+                cc1.write(str(c.get("dt") or "")[:10])
+                amt = float(c.get("amount") or 0)
+                cc2.markdown(f"<span style='color:{'#2FB67A' if amt >= 0 else '#E0635C'}'>{amt:,.2f}</span>",
+                             unsafe_allow_html=True)
+                cc3.write(c.get("note") or "")
+                if cc4.button("🗑", key=f"cf{c['id']}"):
+                    store.delete_cashflow(c["id"]); st.rerun()
+        else:
+            st.write("—")
+        with st.form("acf"):
+            f1, f2, f3 = st.columns([2, 2, 3])
+            cf_dt = f1.date_input("Datum", value=date.today())
+            cf_amt = f2.number_input("Betrag (+/−)", value=0.0, format="%.2f", step=100.0)
+            cf_note = f3.text_input("Notiz (optional)")
+            if st.form_submit_button("➕ Buchung hinzufügen") and cf_amt != 0:
+                store.add_cashflow(aid, cf_dt.isoformat(), cf_amt, cf_note.strip() or None)
+                st.rerun()
+
     st.divider()
     for label, key in [("Setups", "setups"), ("Fehler-Tags", "mistakes"), ("Regeln", "rules")]:
         st.subheader(label); items = store.get_list(key) or []
