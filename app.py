@@ -753,7 +753,12 @@ def page_coach():
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Review")
-        n = st.slider("Letzte … Trades", 3, max(3, len(rows)), min(20, len(rows)))
+        total = len(rows)
+        if total <= 3:
+            n = total
+            st.caption(f"Es werden alle {total} Trades ausgewertet.")
+        else:
+            n = st.slider("Letzte … Trades", 3, total, min(20, total))
         if st.button("Auswertung starten"):
             with st.spinner("KI analysiert…"):
                 try: st.markdown(ai.review(rows[:n]))
