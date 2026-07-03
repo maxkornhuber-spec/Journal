@@ -10,6 +10,7 @@ import streamlit as st
 
 import store
 import ai
+import mt5_import
 
 st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide")
 
@@ -103,7 +104,10 @@ def require_login():
 
 
 require_login()
-store.seed_defaults()
+# Grunddaten nur EINMAL pro Sitzung anlegen (nicht bei jedem Klick — Tempo!)
+if not st.session_state.get("seeded"):
+    store.seed_defaults()
+    st.session_state["seeded"] = True
 
 
 # ======================================================================
@@ -455,23 +459,63 @@ def page_dashboard():
         wr_i = len(indisc[indisc["pnl"] > 0])/len(indisc)*100 if len(indisc) else 0
         st.caption(f"🧭 Disziplin — Trefferquote **mit** allen Regeln: {wr_d:.0f} % ({len(disc)}) · **ohne**: {wr_i:.0f} % ({len(indisc)})")
 
-    def signed_bars(data, label_col, title):
-        d = data.reset_index()
-        d.columns = [label_col, "pnl"]
+    # --- Zeit-Übersicht: Tage / Wochen / Monate (kompakt, einklappbar) ---
+    with st.expander("📅 Zeit-Übersicht — Tage · Wochen · Monate", expanded=False):
+        tt = closed.dropna(subset=["dt"]).copy()
+        if tt.empty:
+            st.caption("Keine datierten Trades im Zeitraum.")
+        else:
+            def _period_table(df_p, label):
+                g = df_p.groupby("periode").agg(
+                    pnl=("pnl", "sum"), trades=("pnl", "size"),
+                    wins=("pnl", lambda x: int((x > 0).sum())))
+                g["quote"] = (g["wins"] / g["trades"] * 100).round(0)
+                g = g.sort_index(ascending=False)
+                for idx, row in g.iterrows():
+                    p1, p2, p3, p4 = st.columns([3, 2, 2, 2])
+                    p1.markdown(f"**{idx}**")
+                    farbe = "#2FB67A" if row["pnl"] >= 0 else "#E0635C"
+                    p2.markdown(f"<span style='color:{farbe};font-weight:700'>{row['pnl']:+,.2f} {cur}</span>",
+                                unsafe_allow_html=True)
+                    p3.write(f"{int(row['trades'])} Trades")
+                    p4.write(f"{row['quote']:.0f} %")
+
+            tab_d, tab_w, tab_m = st.tabs(["Tage", "Wochen", "Monate"])
+            with tab_d:
+                d = tt.copy(); d["periode"] = d["dt"].dt.strftime("%d.%m.%Y")
+                d = d.sort_values("dt")
+                _period_table(d, "Tag")
+            with tab_w:
+                w = tt.copy()
+                iso = w["dt"].dt.isocalendar()
+                w["periode"] = "KW " + iso.week.astype(str).str.zfill(2) + " / " + iso.year.astype(str)
+                _period_table(w, "Woche")
+            with tab_m:
+                m_ = tt.copy(); m_["periode"] = m_["dt"].dt.strftime("%m/%Y")
+                _period_table(m_, "Monat")
+
+    def hbars(d, label_col):
+        """Schlanke horizontale Balken mit Wert-Beschriftung — edler & lesbarer."""
+        d = d.reset_index(); d.columns = [label_col, "pnl"]
         d["farbe"] = d["pnl"].apply(lambda v: "Gewinn" if v >= 0 else "Verlust")
-        ch = alt.Chart(d).mark_bar().encode(
-            x=alt.X(f"{label_col}:N", title=None, sort=None),
-            y=alt.Y("pnl:Q", title=None),
-            color=alt.Color("farbe:N",
-                            scale=alt.Scale(domain=["Gewinn", "Verlust"], range=["#2FB67A", "#E0635C"]),
-                            legend=None)).properties(height=260)
-        st.altair_chart(ch, use_container_width=True)
+        h = max(46 * len(d) + 30, 120)
+        base = alt.Chart(d).encode(
+            y=alt.Y(f"{label_col}:N", title=None, sort=None,
+                    axis=alt.Axis(grid=False, ticks=False, domain=False, labelColor="#AEB9C4")),
+            x=alt.X("pnl:Q", title=None,
+                    axis=alt.Axis(grid=False, ticks=False, domain=False, labels=False)))
+        bars = base.mark_bar(cornerRadiusEnd=5, height=20).encode(
+            color=alt.Color("farbe:N", scale=alt.Scale(domain=["Gewinn", "Verlust"],
+                            range=["#2FB67A", "#E0635C"]), legend=None))
+        txt = base.mark_text(align="left", dx=6, fontWeight="bold", color="#E7ECF1").encode(
+            text=alt.Text("pnl:Q", format="+,.0f"))
+        st.altair_chart((bars + txt).properties(height=h), use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("P/L nach Setup")
         bs = closed.groupby("setup")["pnl"].sum().sort_values(ascending=False)
-        if not bs.empty: signed_bars(bs, "Setup", "Setup")
+        if not bs.empty: hbars(bs, "Setup")
     with c2:
         st.subheader("P/L nach Wochentag")
         names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
@@ -479,12 +523,22 @@ def page_dashboard():
         if not t.empty:
             t["wd"] = t["dt"].dt.weekday.map(lambda i: names[i])
             wk = t.groupby("wd")["pnl"].sum().reindex(names).dropna()
-            if not wk.empty: signed_bars(wk, "Wochentag", "Wochentag")
+            if not wk.empty: hbars(wk, "Wochentag")
 
     st.subheader("Häufigste Fehler")
     allm = [m for lst in closed["mistakes"] if isinstance(lst, list) for m in lst]
     if allm:
-        st.bar_chart(pd.Series(allm).value_counts())
+        vc = pd.Series(allm).value_counts().reset_index()
+        vc.columns = ["Fehler", "Anzahl"]
+        h = max(40 * len(vc) + 30, 110)
+        ch = alt.Chart(vc).mark_bar(cornerRadiusEnd=5, height=18, color="#E7AE5C").encode(
+            y=alt.Y("Fehler:N", title=None, sort="-x",
+                    axis=alt.Axis(grid=False, ticks=False, domain=False, labelColor="#AEB9C4")),
+            x=alt.X("Anzahl:Q", title=None,
+                    axis=alt.Axis(grid=False, ticks=False, domain=False, labels=False)))
+        tx = alt.Chart(vc).mark_text(align="left", dx=6, color="#E7ECF1", fontWeight="bold").encode(
+            y=alt.Y("Fehler:N", sort="-x"), x="Anzahl:Q", text="Anzahl:Q")
+        st.altair_chart((ch + tx).properties(height=h), use_container_width=True)
     else:
         st.caption("Noch keine Fehler-Tags.")
 
@@ -532,6 +586,48 @@ def page_new():
                 if inc and name == inc["name"]:
                     st.session_state.pop("incoming_img", None)
                 st.success("Gespeichert ✔"); st.rerun()
+
+    st.divider()
+    with st.expander("📥 MetaTrader-5-Import (optional)", expanded=False):
+        st.caption("In MT5: Verlauf → Rechtsklick → **Bericht** als HTML speichern (oder CSV) → hier reinziehen. "
+                   "Doppelte Trades werden automatisch erkannt und übersprungen.")
+        up = st.file_uploader("MT5-Bericht (HTML/CSV)", type=["html", "htm", "xls", "csv", "txt"], key="mt5file")
+        if up is not None:
+            try:
+                up.seek(0)
+                parsed = mt5_import.parse_mt5(up.read(), up.name)
+            except Exception as e:
+                st.error(f"Datei konnte nicht gelesen werden: {e}")
+                parsed = []
+            if parsed:
+                existing = store.list_trades(acct_id())
+                fresh, dupes, unsure = mt5_import.dedupe(parsed, existing)
+                st.markdown(f"**Vorschau:** 🟢 {len(fresh)} neu · ⚪ {len(dupes)} übersprungen (schon vorhanden) "
+                            f"· 🟠 {len(unsure)} unsicher")
+                if unsure:
+                    st.warning("Unsichere Kandidaten (gleiches Symbol, Datum und P/L wie ein vorhandener Trade). "
+                               "Nur ankreuzen, was wirklich NEU ist:")
+                    take = []
+                    for i, u in enumerate(unsure):
+                        lbl = f"{u['symbol']} · {u.get('closed_at') or '—'} · {u.get('pnl'):+.2f}"
+                        if st.checkbox(lbl, value=False, key=f"unsure{i}"):
+                            take.append(u)
+                else:
+                    take = []
+                if fresh or take:
+                    if st.button(f"✅ {len(fresh) + len(take)} Trades importieren"):
+                        n = 0
+                        for t in fresh + take:
+                            rec = {k: v for k, v in t.items() if v is not None}
+                            rec["account_id"] = acct_id()
+                            rec["status"] = "zu"
+                            rec.setdefault("setup", "Sonstiges")
+                            store.add_trade(rec)
+                            n += 1
+                        st.success(f"{n} Trades importiert ✔")
+                        st.rerun()
+                elif not unsure:
+                    st.info("Nichts zu importieren — alles schon vorhanden.")
 
 
 def page_trades():
