@@ -136,6 +136,42 @@ def remove_from_list(name, item):
         set_list(name, items)
 
 
+# --- Risiko pro Setup (1 R in Konto-Waehrung) ---------------------------
+# Wird in derselben Tabelle app_lists gespeichert, unter dem Namen "risk_setup".
+# Struktur: {"Swing": 500, "News": 200, ...}. Keine SQL-Aenderung noetig.
+@st.cache_data(ttl=600, show_spinner=False)
+def get_risk_map():
+    r = client().table("app_lists").select("items").eq("name", "risk_setup").limit(1).execute()
+    if not r.data:
+        return {}
+    val = r.data[0].get("items")
+    return val if isinstance(val, dict) else {}
+
+
+def set_risk_map(mapping: dict):
+    clean = {}
+    for k, v in (mapping or {}).items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            clean[str(k)] = f
+    client().table("app_lists").upsert({"name": "risk_setup", "items": clean}).execute()
+    _fresh()
+
+
+def risk_for(setup: str, default: float = 0.0) -> float:
+    """Liefert 1 R (Euro) fuer ein Setup; 0 wenn nichts hinterlegt."""
+    if not setup:
+        return default or 0.0
+    m = get_risk_map()
+    try:
+        return float(m.get(setup, default) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def seed_defaults():
     if get_list("setups") is None:
         set_list("setups", DEFAULT_SETUPS)
