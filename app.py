@@ -246,6 +246,19 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
                                      value=float(pv("pnl", 0.0)), format="%.2f", step=1.0, key=f"pn{prefix}",
                                      help="Trag hier einfach dein Ergebnis ein. Lässt du 0 stehen und füllst Entry/Exit/Lots aus, wird es automatisch berechnet.")
 
+        # R-Multiple: aus 1R des Setups automatisch, aber vom Nutzer überschreibbar
+        risk_1r = store.risk_for(setup)
+        auto_r = (pnl_manual / risk_1r) if (risk_1r and pnl_manual) else float(pv("pnl_r", 0.0) or 0.0)
+        cR1, cR2 = st.columns([2, 3])
+        r_manual = cR1.number_input(
+            "R-Multiple", value=round(auto_r, 2), step=0.1, format="%.2f", key=f"rm_r{prefix}",
+            help="Vielfaches deines Risikos. Wird automatisch aus 1 R des Setups berechnet — hier änderbar.")
+        if risk_1r:
+            cR2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} €  ·  automatisch: {auto_r:+.2f} R")
+        else:
+            cR2.caption("Für dieses Setup ist noch **kein 1 R** hinterlegt. "
+                        "→ Einstellungen › 🎯 Risiko pro Setup")
+
         st.caption("Optional: Kurse für automatische Berechnung von P/L, R und Pips")
         c4, c5, c6, c7 = st.columns(4)
         entry = c4.number_input("Entry", value=float(pv("entry_price", 0.0)), format="%.6f", key=f"en{prefix}")
@@ -277,7 +290,7 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             "account_id": account_id, "symbol": sym, "direction": direction,
             "entry_price": e, "exit_price": x, "stop_price": sp, "quantity": q,
             "pnl": pnl,
-            "pnl_r": None if is_open else compute_r(pnl, e, sp, q),
+            "pnl_r": None if is_open else (r_manual if r_manual != 0 else compute_r(pnl, e, sp, q)),
             "pips": None if is_open else compute_pips(sym, direction, e, x),
             "status": "offen" if is_open else "zu",
             "opened_at": opened_d.isoformat(),
@@ -417,6 +430,9 @@ def page_dashboard():
 
     s = stats(closed)
     net_tone = "pos" if s["net"] >= 0 else "neg"
+    # Summe R (nur numerische, echte Werte)
+    r_sum = float(pd.to_numeric(closed.get("pnl_r"), errors="coerce").sum()) if "pnl_r" in closed else 0.0
+    r_tone = "pos" if r_sum >= 0 else "neg"
     kpi(r0[1], "Netto P/L" + suffix, f"{s['net']:,.2f} {cur}", net_tone)
     kpi(r0[2], "Trefferquote", f"{s['win_rate']:.0f} %", "neutral")
     kpi(r0[3], "Trades", f"{s['n']}", "neutral")
@@ -424,7 +440,9 @@ def page_dashboard():
     kpi(r2[0], "Gewinner / Verlierer", f"{s['wins']} / {s['losses']}", "neutral")
     kpi(r2[1], "Profit-Faktor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}", "neutral")
     kpi(r2[2], "Ø R", "—" if s["avg_r"] is None or pd.isna(s["avg_r"]) else f"{s['avg_r']:.2f} R", "neutral")
-    kpi(r2[3], "Max. Drawdown", ("0.00 " + cur) if s["max_dd"] <= 0 else f"-{s['max_dd']:,.2f} {cur}",
+    kpi(r2[3], "Summe R", f"{r_sum:+.2f} R", r_tone)
+    r3 = st.columns(4)
+    kpi(r3[0], "Max. Drawdown", ("0.00 " + cur) if s["max_dd"] <= 0 else f"-{s['max_dd']:,.2f} {cur}",
         "neg" if s["max_dd"] > 0 else "neutral")
 
     st.divider()
@@ -477,19 +495,33 @@ def page_dashboard():
             st.caption("Keine datierten Trades im Zeitraum.")
         else:
             def _period_table(df_p, label):
-                g = df_p.groupby("periode").agg(
-                    pnl=("pnl", "sum"), trades=("pnl", "size"),
-                    wins=("pnl", lambda x: int((x > 0).sum())))
+                has_r = "pnl_r" in df_p.columns
+                if has_r:
+                    df_p = df_p.copy()
+                    df_p["pnl_r"] = pd.to_numeric(df_p["pnl_r"], errors="coerce")
+                    g = df_p.groupby("periode").agg(
+                        pnl=("pnl", "sum"), trades=("pnl", "size"),
+                        wins=("pnl", lambda x: int((x > 0).sum())),
+                        r=("pnl_r", "sum"))
+                else:
+                    g = df_p.groupby("periode").agg(
+                        pnl=("pnl", "sum"), trades=("pnl", "size"),
+                        wins=("pnl", lambda x: int((x > 0).sum())))
+                    g["r"] = 0.0
                 g["quote"] = (g["wins"] / g["trades"] * 100).round(0)
                 g = g.sort_index(ascending=False)
                 for idx, row in g.iterrows():
-                    p1, p2, p3, p4 = st.columns([3, 2, 2, 2])
+                    p1, p2, p3, p4, p5 = st.columns([3, 2, 2, 2, 2])
                     p1.markdown(f"**{idx}**")
                     farbe = "#2FB67A" if row["pnl"] >= 0 else "#E0635C"
                     p2.markdown(f"<span style='color:{farbe};font-weight:700'>{row['pnl']:+,.2f} {cur}</span>",
                                 unsafe_allow_html=True)
-                    p3.write(f"{int(row['trades'])} Trades")
-                    p4.write(f"{row['quote']:.0f} %")
+                    r_val = float(row["r"]) if pd.notna(row["r"]) else 0.0
+                    r_col = "#2FB67A" if r_val >= 0 else "#E0635C"
+                    p3.markdown(f"<span style='color:{r_col};font-weight:700'>{r_val:+.2f} R</span>",
+                                unsafe_allow_html=True)
+                    p4.write(f"{int(row['trades'])} Trades")
+                    p5.write(f"{row['quote']:.0f} %")
 
             tab_d, tab_w, tab_m = st.tabs(["Tage", "Wochen", "Monate"])
             with tab_d:
@@ -551,15 +583,28 @@ def page_dashboard():
         sel_m = st.selectbox("Monat", months, index=0, key="calmonth",
                              format_func=lambda m: f"{m[5:]}/{m[:4]}")
         y, mo = int(sel_m[:4]), int(sel_m[5:])
-        mdf = cal_src[(cal_src["dt"].dt.year == y) & (cal_src["dt"].dt.month == mo)]
-        g = mdf.groupby(mdf["dt"].dt.day).agg(
-            pnl=("pnl", "sum"), n=("pnl", "size"),
-            wins=("pnl", lambda x: int((x > 0).sum())))
+        mdf = cal_src[(cal_src["dt"].dt.year == y) & (cal_src["dt"].dt.month == mo)].copy()
+        if "pnl_r" in mdf.columns:
+            mdf["pnl_r"] = pd.to_numeric(mdf["pnl_r"], errors="coerce")
+            g = mdf.groupby(mdf["dt"].dt.day).agg(
+                pnl=("pnl", "sum"), n=("pnl", "size"),
+                wins=("pnl", lambda x: int((x > 0).sum())),
+                r=("pnl_r", "sum"))
+        else:
+            g = mdf.groupby(mdf["dt"].dt.day).agg(
+                pnl=("pnl", "sum"), n=("pnl", "size"),
+                wins=("pnl", lambda x: int((x > 0).sum())))
+            g["r"] = 0.0
         m_pnl = float(mdf["pnl"].sum()) if not mdf.empty else 0.0
+        m_r = float(pd.to_numeric(mdf.get("pnl_r"), errors="coerce").sum()) if not mdf.empty else 0.0
         m_col = "#2FB67A" if m_pnl >= 0 else "#E0635C"
-        st.markdown(f"<div style='margin:.2rem 0 .6rem'>Monats-P/L: "
-                    f"<b style='color:{m_col}'>{m_pnl:+,.2f} {cur}</b> · {len(mdf)} Trades</div>",
-                    unsafe_allow_html=True)
+        r_col_m = "#2FB67A" if m_r >= 0 else "#E0635C"
+        st.markdown(
+            f"<div style='margin:.2rem 0 .6rem'>Monats-P/L: "
+            f"<b style='color:{m_col}'>{m_pnl:+,.2f} {cur}</b> · "
+            f"<b style='color:{r_col_m}'>{m_r:+.2f} R</b> · "
+            f"{len(mdf)} Trades</div>",
+            unsafe_allow_html=True)
 
         import calendar as _cal
         weeks = _cal.Calendar(firstweekday=0).monthdayscalendar(y, mo)  # Montag zuerst (MEZ/DE)
@@ -573,11 +618,13 @@ def page_dashboard():
                 if d in g.index:
                     row = g.loc[d]
                     pnl, n, wins = float(row["pnl"]), int(row["n"]), int(row["wins"])
+                    r_day = float(row["r"]) if pd.notna(row["r"]) else 0.0
                     wr = wins / n * 100 if n else 0
                     cls = "calc-pos" if pnl > 0 else ("calc-neg" if pnl < 0 else "calc-zero")
                     cells.append(
                         f"<div class='calc {cls}'><div class='cald'>{d}</div>"
                         f"<div class='calp'>{pnl:+,.0f}</div>"
+                        f"<div class='calr'>{r_day:+.2f} R</div>"
                         f"<div class='calm'>{n} T · {wr:.0f}%</div></div>")
                 else:
                     cells.append(f"<div class='calc'><div class='cald'>{d}</div></div>")
@@ -594,6 +641,8 @@ def page_dashboard():
           .cald{color:#8494A2;font-size:.72rem;font-weight:600}
           .calp{font-weight:800;font-size:.95rem;margin-top:2px;color:#E7ECF1}
           .calc-pos .calp{color:#2FB67A}.calc-neg .calp{color:#E0635C}
+          .calr{font-size:.72rem;font-weight:700;color:#AEB9C4;margin-top:1px}
+          .calc-pos .calr{color:#2FB67A}.calc-neg .calr{color:#E0635C}
           .calm{color:#8494A2;font-size:.7rem;margin-top:1px}
         </style>""", unsafe_allow_html=True)
         st.markdown(f"<div class='calgrid'>{head}{''.join(cells)}</div>", unsafe_allow_html=True)
@@ -709,6 +758,11 @@ def page_trades():
     if not rows:
         st.info("Noch keine Trades."); return
     df = trades_df(acct_id())
+    # Fortlaufende Nummer pro Konto — ohne Luecken, aeltester = #1.
+    # Wird live berechnet: nach dem Loeschen rutschen die Nummern automatisch nach.
+    order = df.sort_values("id", ascending=True)["id"].tolist()
+    id_to_nr = {tid: i + 1 for i, tid in enumerate(order)}
+    df["Nr"] = df["id"].map(id_to_nr)
     if "status" in df:
         df["Status"] = df["status"].map(lambda s: "🟡 läuft" if s == "offen" else "✅ zu")
     else:
@@ -716,11 +770,14 @@ def page_trades():
     df["Einstieg"] = df.get("opened_at")
     df["Ausstieg"] = df.get("closed_at")
     df["Haltetage"] = df.get("haltetage")
-    cols = [c for c in ["id", "Einstieg", "Ausstieg", "Haltetage", "symbol", "direction",
+    cols = [c for c in ["Nr", "Einstieg", "Ausstieg", "Haltetage", "symbol", "direction",
                         "setup", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
-    st.dataframe(df[cols], use_container_width=True, hide_index=True)
+    show = df.sort_values("Nr", ascending=False)[cols]      # neueste zuerst anzeigen
+    st.dataframe(show, use_container_width=True, hide_index=True)
     st.divider()
-    sel = st.selectbox("Trade öffnen", [r["id"] for r in rows], format_func=lambda i: f"#{i}")
+    sel = st.selectbox("Trade öffnen", [r["id"] for r in rows],
+                       format_func=lambda i: f"#{id_to_nr.get(i, '?')} — {store.get_trade(i).get('symbol') or ''}"
+                                             if False else f"#{id_to_nr.get(i, '?')}")
     t = store.get_trade(sel)
     if not t: return
     left, right = st.columns(2)
@@ -739,7 +796,7 @@ def page_trades():
                 dauer = f" · Haltedauer {tage} Tage"
             except Exception:
                 pass
-        st.write(f"**{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}  \n"
+        st.write(f"**Nr {id_to_nr.get(sel, '?')}** · **{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}  \n"
                  f"Einstieg {t.get('opened_at') or '—'} → Ausstieg {t.get('closed_at') or '—'}{dauer}  \n"
                  f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
                  f"P/L **{t.get('pnl')}** · {t.get('pnl_r')} R · {t.get('pips')} Pips")
@@ -785,6 +842,15 @@ def page_trades():
             new_pnl = st.number_input("Gewinn / Verlust in € (Minus = Verlust)",
                                       value=float(t.get("pnl") or 0.0), format="%.2f", step=1.0)
             setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
+            # R fuer diesen Trade: Vorschlag aus 1R des Setups, aber ueberschreibbar
+            risk_1r = store.risk_for(setup)
+            suggested_r = (new_pnl / risk_1r) if (risk_1r and new_pnl) else float(t.get("pnl_r") or 0.0)
+            rr1, rr2 = st.columns([2, 3])
+            new_r = rr1.number_input("R-Multiple", value=round(suggested_r, 2), step=0.1, format="%.2f")
+            if risk_1r:
+                rr2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} €  ·  Vorschlag: {suggested_r:+.2f} R")
+            else:
+                rr2.caption("Für dieses Setup ist noch **kein 1 R** hinterlegt (Einstellungen › 🎯 Risiko pro Setup).")
             sel_m = st.multiselect("Fehler-Tags", mistakes, default=t.get("mistakes") or [])
             r_in = st.text_area("Warum eingestiegen?", value=t.get("reason_entry") or "", height=70)
             r_out = st.text_area("Warum/wie geschlossen?", value=t.get("reason_exit") or "", height=70)
@@ -802,7 +868,8 @@ def page_trades():
                     "opened_at": c_open.isoformat(),
                     "closed_at": None if will_open else c_close.isoformat(),
                     "pnl": None if will_open else new_pnl,
-                    "pnl_r": None if will_open else compute_r(new_pnl, ce or None, cstop or None, cq or None),
+                    "pnl_r": None if will_open else (new_r if new_r != 0
+                                                    else compute_r(new_pnl, ce or None, cstop or None, cq or None)),
                     "pips": None if will_open else compute_pips(sym, cdir, ce or None, cx or None),
                     "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
                     "management": r_mng.strip() or None, "notes": notes.strip() or None})
@@ -866,6 +933,31 @@ def page_settings():
         sb = c3.number_input("Startguthaben", value=0.0, format="%.2f", step=100.0)
         if st.form_submit_button("➕ Konto anlegen") and nm.strip():
             store.add_account(nm, cu, sb); st.rerun()
+
+    st.divider()
+    st.subheader("🎯 Risiko pro Setup (1 R)")
+    st.caption("Trag pro Setup ein, was **1 R** in Euro bedeutet (z. B. Swing 500, News 200). "
+               "Beim Trade wird das R-Multiple automatisch daraus berechnet, du kannst es pro Trade aber "
+               "jederzeit ändern.")
+    setups_all = store.get_list("setups") or []
+    risk_map = store.get_risk_map()
+    if not setups_all:
+        st.info("Zuerst Setups anlegen — siehe Bereich weiter unten.")
+    else:
+        with st.form("risk_setup_form"):
+            new_map = {}
+            for s in setups_all:
+                cA, cB = st.columns([2, 3])
+                cA.markdown(f"**{s}**")
+                v = cB.number_input(f"1 R für {s} (€)", value=float(risk_map.get(s, 0) or 0),
+                                    step=50.0, format="%.2f", key=f"risk_{s}",
+                                    label_visibility="collapsed")
+                if v > 0:
+                    new_map[s] = v
+            if st.form_submit_button("💾 Risiko-Werte speichern"):
+                store.set_risk_map(new_map)
+                st.success("Gespeichert ✔")
+                st.rerun()
 
     st.divider()
     st.subheader("💰 Ein-/Auszahlungen (aktives Konto)")
