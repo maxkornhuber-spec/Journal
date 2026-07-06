@@ -143,11 +143,20 @@ def trades_df(account_id):
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    if "pnl" in df:
-        df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce")
+    for c in ("pnl", "pnl_r", "pips", "entry_price", "exit_price", "stop_price", "quantity"):
+        if c in df:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
     df["dt"] = pd.to_datetime(df.get("closed_at"), errors="coerce")
     if "created_at" in df:
-        df["dt"] = df["dt"].fillna(pd.to_datetime(df["created_at"], errors="coerce"))
+        # Supabase liefert created_at MIT Zeitzone -> nach MEZ umrechnen und
+        # Zeitzonen-Info entfernen, sonst wird die Spalte unbrauchbar (Crash).
+        ca = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+        try:
+            ca = ca.dt.tz_convert("Europe/Berlin").dt.tz_localize(None).dt.normalize()
+        except Exception:
+            ca = ca.dt.tz_localize(None)
+        df["dt"] = df["dt"].fillna(ca)
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")   # garantiert datetime-Typ
     df["opened_dt"] = pd.to_datetime(df.get("opened_at"), errors="coerce") if "opened_at" in df else pd.NaT
     # Haltedauer in Tagen (Ausstieg - Einstieg); bei offenen Trades: heute - Einstieg
     exit_for_dur = pd.to_datetime(df.get("closed_at"), errors="coerce")
@@ -461,7 +470,9 @@ def page_dashboard():
 
     # --- Zeit-Übersicht: Tage / Wochen / Monate (kompakt, einklappbar) ---
     with st.expander("📅 Zeit-Übersicht — Tage · Wochen · Monate", expanded=False):
-        tt = closed.dropna(subset=["dt"]).copy()
+        tt = closed.copy()
+        tt["dt"] = pd.to_datetime(tt["dt"], errors="coerce")
+        tt = tt.dropna(subset=["dt"])
         if tt.empty:
             st.caption("Keine datierten Trades im Zeitraum.")
         else:
@@ -524,6 +535,68 @@ def page_dashboard():
             t["wd"] = t["dt"].dt.weekday.map(lambda i: names[i])
             wk = t.groupby("wd")["pnl"].sum().reindex(names).dropna()
             if not wk.empty: hbars(wk, "Wochentag")
+
+    # --- Trading-Kalender: Monatsraster mit Tages-P/L (gruen/rot) ---
+    st.subheader("📅 Trading-Kalender")
+    cal_src = closed_all.copy()
+    cal_src["dt"] = pd.to_datetime(cal_src["dt"], errors="coerce")
+    cal_src = cal_src.dropna(subset=["dt"])
+    if cal_src.empty:
+        st.caption("Noch keine datierten Trades.")
+    else:
+        months = sorted(cal_src["dt"].dt.strftime("%Y-%m").unique(), reverse=True)
+        cur_month = pd.Timestamp(date.today()).strftime("%Y-%m")
+        if cur_month not in months:
+            months = [cur_month] + months
+        sel_m = st.selectbox("Monat", months, index=0, key="calmonth",
+                             format_func=lambda m: f"{m[5:]}/{m[:4]}")
+        y, mo = int(sel_m[:4]), int(sel_m[5:])
+        mdf = cal_src[(cal_src["dt"].dt.year == y) & (cal_src["dt"].dt.month == mo)]
+        g = mdf.groupby(mdf["dt"].dt.day).agg(
+            pnl=("pnl", "sum"), n=("pnl", "size"),
+            wins=("pnl", lambda x: int((x > 0).sum())))
+        m_pnl = float(mdf["pnl"].sum()) if not mdf.empty else 0.0
+        m_col = "#2FB67A" if m_pnl >= 0 else "#E0635C"
+        st.markdown(f"<div style='margin:.2rem 0 .6rem'>Monats-P/L: "
+                    f"<b style='color:{m_col}'>{m_pnl:+,.2f} {cur}</b> · {len(mdf)} Trades</div>",
+                    unsafe_allow_html=True)
+
+        import calendar as _cal
+        weeks = _cal.Calendar(firstweekday=0).monthdayscalendar(y, mo)  # Montag zuerst (MEZ/DE)
+        head = "".join(f"<div class='calh'>{w}</div>" for w in ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"])
+        cells = []
+        for week in weeks:
+            for d in week:
+                if d == 0:
+                    cells.append("<div class='calc calc-empty'></div>")
+                    continue
+                if d in g.index:
+                    row = g.loc[d]
+                    pnl, n, wins = float(row["pnl"]), int(row["n"]), int(row["wins"])
+                    wr = wins / n * 100 if n else 0
+                    cls = "calc-pos" if pnl > 0 else ("calc-neg" if pnl < 0 else "calc-zero")
+                    cells.append(
+                        f"<div class='calc {cls}'><div class='cald'>{d}</div>"
+                        f"<div class='calp'>{pnl:+,.0f}</div>"
+                        f"<div class='calm'>{n} T · {wr:.0f}%</div></div>")
+                else:
+                    cells.append(f"<div class='calc'><div class='cald'>{d}</div></div>")
+        st.markdown("""<style>
+          .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:.3rem}
+          .calh{color:#8494A2;font-size:.72rem;font-weight:700;text-transform:uppercase;
+                letter-spacing:.05em;text-align:center;padding:2px 0}
+          .calc{background:#141C27;border:1px solid #232F3D;border-radius:10px;
+                min-height:64px;padding:6px 8px}
+          .calc-empty{background:transparent;border:none}
+          .calc-pos{background:rgba(47,182,122,.14);border-color:rgba(47,182,122,.45)}
+          .calc-neg{background:rgba(224,99,92,.14);border-color:rgba(224,99,92,.45)}
+          .calc-zero{border-color:#33465A}
+          .cald{color:#8494A2;font-size:.72rem;font-weight:600}
+          .calp{font-weight:800;font-size:.95rem;margin-top:2px;color:#E7ECF1}
+          .calc-pos .calp{color:#2FB67A}.calc-neg .calp{color:#E0635C}
+          .calm{color:#8494A2;font-size:.7rem;margin-top:1px}
+        </style>""", unsafe_allow_html=True)
+        st.markdown(f"<div class='calgrid'>{head}{''.join(cells)}</div>", unsafe_allow_html=True)
 
     st.subheader("Häufigste Fehler")
     allm = [m for lst in closed["mistakes"] if isinstance(lst, list) for m in lst]
