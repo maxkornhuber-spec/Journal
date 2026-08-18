@@ -224,6 +224,11 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
     def pv(k, d=None):
         v = prefill.get(k); return v if v not in (None, "") else d
 
+    # Tranchen-Anzahl VOR dem Formular (nur so erscheinen die Zeilen sofort)
+    n_tr = st.selectbox("Tranchen (Teil-Einstiege)", [1, 2, 3], index=0, key=f"trn{prefix}",
+                        help="Wie viele Teil-Einstiege hat diese Position? "
+                             "1 R bleibt immer der volle Betrag deines Setups.")
+
     with st.form(f"f_{prefix}"):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -248,12 +253,18 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
 
         # R-Multiple: aus 1R des Setups automatisch, aber vom Nutzer überschreibbar
         risk_1r = store.risk_for(setup)
-        # Tranchen sind reine Doku (Teil-Einstieg). R wird IMMER gegen das volle 1 R gerechnet.
-        TR_OPTS = {"Voll (3/3)": 3, "2 von 3 Tranchen": 2, "1 von 3 Tranchen": 1}
-        tr_sel = st.selectbox("Position / Tranchen", list(TR_OPTS.keys()), index=0, key=f"tr{prefix}",
-                              help="Nur zur Dokumentation deines Teil-Einstiegs. "
-                                   "1 R bleibt immer der volle Betrag deines Setups.")
-        tranches = TR_OPTS[tr_sel]
+        # Teil-Einstiege: pro Tranche Datum + Entry + Groesse (reine Doku;
+        # 1 R bleibt immer der volle Betrag, P/L bleibt EINE Gesamtsumme)
+        tranche_rows = []
+        if n_tr > 1:
+            st.caption(f"Teil-Einstiege ({n_tr} Tranchen)")
+        for i in range(n_tr):
+            tc1, tc2, tc3 = st.columns([2, 2, 2])
+            td = tc1.date_input(f"Tranche {i+1} — Datum", value=date.today(), key=f"td{i}{prefix}")
+            te = tc2.number_input(f"Tranche {i+1} — Entry", value=0.0, format="%.6f", key=f"te{i}{prefix}")
+            ts = tc3.number_input(f"Tranche {i+1} — Größe (Lots)", value=0.0, format="%.4f", key=f"ts{i}{prefix}")
+            tranche_rows.append({"datum": td.isoformat(), "entry": te or None, "size": ts or None})
+        tranches = n_tr
         auto_r = (pnl_manual / risk_1r) if (risk_1r and pnl_manual) else float(pv("pnl_r", 0.0) or 0.0)
         cR1, cR2 = st.columns([2, 3])
         r_manual = cR1.number_input(
@@ -300,6 +311,7 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             "pips": None if is_open else compute_pips(sym, direction, e, x),
             "status": "offen" if is_open else "zu",
             "tranches": tranches,
+            "tranche_data": tranche_rows,
             "opened_at": opened_d.isoformat(),
             "closed_at": None if is_open else closed_d.isoformat(),
             "setup": setup,
@@ -796,7 +808,7 @@ def page_trades():
     df["Ausstieg"] = df.get("closed_at")
     df["Haltetage"] = df.get("haltetage")
     if "tranches" in df:
-        df["Tranchen"] = df["tranches"].map(lambda v: f"{int(v)}/3" if pd.notna(v) and int(v) < 3 else "—")
+        df["Tranchen"] = df["tranches"].map(lambda v: f"{int(v)}×" if pd.notna(v) and int(v) > 1 else "—")
     cols = [c for c in ["Nr", "Einstieg", "Ausstieg", "Haltetage", "symbol", "direction",
                         "setup", "Tranchen", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
     show = df.sort_values("Nr", ascending=False)[cols]      # neueste zuerst anzeigen
@@ -816,8 +828,9 @@ def page_trades():
             st.caption("Kein Screenshot.")
         badge = "🟡 läuft noch" if t.get("status") == "offen" else "✅ abgeschlossen"
         tr_txt = ""
-        if t.get("tranches") and int(t["tranches"]) < 3:
-            tr_txt = f" · Tranchen {int(t['tranches'])}/3"
+        td_list = t.get("tranche_data") if isinstance(t.get("tranche_data"), list) else []
+        if t.get("tranches") and int(t["tranches"]) > 1:
+            tr_txt = f" · {int(t['tranches'])} Tranchen"
         dauer = ""
         if t.get("opened_at"):
             end = t.get("closed_at") or date.today().isoformat()
@@ -830,6 +843,15 @@ def page_trades():
                  f"Einstieg {t.get('opened_at') or '—'} → Ausstieg {t.get('closed_at') or '—'}{dauer}  \n"
                  f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
                  f"P/L **{t.get('pnl')}** · {t.get('pnl_r')} R · {t.get('pips')} Pips")
+        if td_list:
+            lines = []
+            for i, tr in enumerate(td_list, start=1):
+                d_ = str(tr.get("datum") or "—")[:10]
+                e_ = tr.get("entry"); s_ = tr.get("size")
+                e_txt = f" @ {e_}" if e_ else ""
+                s_txt = f" · {s_} Lots" if s_ else ""
+                lines.append(f"Tranche {i}: {d_}{e_txt}{s_txt}")
+            st.caption("  \n".join(lines))
         if t.get("ai_setup") is not None:
             st.markdown(f"**KI-Urteil:** Setup {t['ai_setup']} · Ausführung {t.get('ai_exec')} · Psyche {t.get('ai_psych')}")
             if t.get("ai_weakness"): st.caption(f"Schwäche: {t['ai_weakness']}")
@@ -843,6 +865,12 @@ def page_trades():
     with right:
         setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []
         is_open_now = (t.get("status") == "offen")
+        saved_td = t.get("tranche_data") if isinstance(t.get("tranche_data"), list) else []
+        cur_tr = int(t.get("tranches") or (len(saved_td) if saved_td else 1))
+        cur_tr = min(max(cur_tr, 1), 3)
+        n_tr_e = st.selectbox("Tranchen (Teil-Einstiege)", [1, 2, 3], index=cur_tr - 1, key=f"trne{sel}",
+                              help="Nachgekauft? Einfach hochstellen und die neue Zeile ausfüllen. "
+                                   "1 R bleibt immer der volle Betrag.")
         with st.form("edit"):
             st.markdown("**Trade bearbeiten**")
             if is_open_now:
@@ -874,13 +902,21 @@ def page_trades():
             setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
             # R fuer diesen Trade: Vorschlag aus 1R des Setups, aber ueberschreibbar
             risk_1r = store.risk_for(setup)
-            TR_OPTS_E = {"Voll (3/3)": 3, "2 von 3 Tranchen": 2, "1 von 3 Tranchen": 1}
-            cur_tr = int(t.get("tranches") or 3)
-            tr_idx = {3: 0, 2: 1, 1: 2}.get(cur_tr, 0)
-            tr_sel_e = st.selectbox("Position / Tranchen", list(TR_OPTS_E.keys()), index=tr_idx,
-                                    help="Nur Doku deines Teil-Einstiegs — nachfüllen jederzeit. "
-                                         "1 R bleibt immer der volle Betrag.")
-            new_tranches = TR_OPTS_E[tr_sel_e]
+            # Teil-Einstiege bearbeiten (Datum + Entry + Groesse je Tranche)
+            new_td = []
+            if n_tr_e > 1:
+                st.caption(f"Teil-Einstiege ({n_tr_e} Tranchen)")
+            for i in range(n_tr_e):
+                old = saved_td[i] if i < len(saved_td) else {}
+                tc1, tc2, tc3 = st.columns([2, 2, 2])
+                td_v = tc1.date_input(f"Tranche {i+1} — Datum", value=_parse_d(old.get("datum")),
+                                      key=f"etd{i}{sel}")
+                te_v = tc2.number_input(f"Tranche {i+1} — Entry", value=float(old.get("entry") or 0.0),
+                                        format="%.6f", key=f"ete{i}{sel}")
+                ts_v = tc3.number_input(f"Tranche {i+1} — Größe (Lots)", value=float(old.get("size") or 0.0),
+                                        format="%.4f", key=f"ets{i}{sel}")
+                new_td.append({"datum": td_v.isoformat(), "entry": te_v or None, "size": ts_v or None})
+            new_tranches = n_tr_e
             suggested_r = (new_pnl / risk_1r) if (risk_1r and new_pnl) else float(t.get("pnl_r") or 0.0)
             rr1, rr2 = st.columns([2, 3])
             new_r = rr1.number_input("R-Multiple", value=round(suggested_r, 2), step=0.1, format="%.2f")
@@ -903,6 +939,7 @@ def page_trades():
                     "setup": setup, "mistakes": sel_m,
                     "status": "offen" if will_open else "zu",
                     "tranches": new_tranches,
+                    "tranche_data": new_td,
                     "opened_at": c_open.isoformat(),
                     "closed_at": None if will_open else c_close.isoformat(),
                     "pnl": None if will_open else new_pnl,
