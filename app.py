@@ -248,13 +248,19 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
 
         # R-Multiple: aus 1R des Setups automatisch, aber vom Nutzer überschreibbar
         risk_1r = store.risk_for(setup)
+        # Tranchen sind reine Doku (Teil-Einstieg). R wird IMMER gegen das volle 1 R gerechnet.
+        TR_OPTS = {"Voll (3/3)": 3, "2 von 3 Tranchen": 2, "1 von 3 Tranchen": 1}
+        tr_sel = st.selectbox("Position / Tranchen", list(TR_OPTS.keys()), index=0, key=f"tr{prefix}",
+                              help="Nur zur Dokumentation deines Teil-Einstiegs. "
+                                   "1 R bleibt immer der volle Betrag deines Setups.")
+        tranches = TR_OPTS[tr_sel]
         auto_r = (pnl_manual / risk_1r) if (risk_1r and pnl_manual) else float(pv("pnl_r", 0.0) or 0.0)
         cR1, cR2 = st.columns([2, 3])
         r_manual = cR1.number_input(
             "R-Multiple", value=round(auto_r, 2), step=0.1, format="%.2f", key=f"rm_r{prefix}",
             help="Vielfaches deines Risikos. Wird automatisch aus 1 R des Setups berechnet — hier änderbar.")
         if risk_1r:
-            cR2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} €  ·  automatisch: {auto_r:+.2f} R")
+            cR2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} € (gilt immer, auch bei Tranchen)  ·  automatisch: {auto_r:+.2f} R")
         else:
             cR2.caption("Für dieses Setup ist noch **kein 1 R** hinterlegt. "
                         "→ Einstellungen › 🎯 Risiko pro Setup")
@@ -293,6 +299,7 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             "pnl_r": None if is_open else (r_manual if r_manual != 0 else compute_r(pnl, e, sp, q)),
             "pips": None if is_open else compute_pips(sym, direction, e, x),
             "status": "offen" if is_open else "zu",
+            "tranches": tranches,
             "opened_at": opened_d.isoformat(),
             "closed_at": None if is_open else closed_d.isoformat(),
             "setup": setup,
@@ -596,15 +603,33 @@ def page_dashboard():
                 wins=("pnl", lambda x: int((x > 0).sum())))
             g["r"] = 0.0
         m_pnl = float(mdf["pnl"].sum()) if not mdf.empty else 0.0
-        m_r = float(pd.to_numeric(mdf.get("pnl_r"), errors="coerce").sum()) if not mdf.empty else 0.0
-        m_col = "#2FB67A" if m_pnl >= 0 else "#E0635C"
-        r_col_m = "#2FB67A" if m_r >= 0 else "#E0635C"
-        st.markdown(
-            f"<div style='margin:.2rem 0 .6rem'>Monats-P/L: "
-            f"<b style='color:{m_col}'>{m_pnl:+,.2f} {cur}</b> · "
-            f"<b style='color:{r_col_m}'>{m_r:+.2f} R</b> · "
-            f"{len(mdf)} Trades</div>",
-            unsafe_allow_html=True)
+        r_ser = pd.to_numeric(mdf.get("pnl_r"), errors="coerce").fillna(0) if not mdf.empty else pd.Series(dtype=float)
+        m_r = float(r_ser.sum()) if not r_ser.empty else 0.0
+        r_pos = float(r_ser[r_ser > 0].sum()) if not r_ser.empty else 0.0
+        r_neg = float(r_ser[r_ser < 0].sum()) if not r_ser.empty else 0.0
+        wins_m = int((mdf["pnl"] > 0).sum()) if not mdf.empty else 0
+        losses_m = int((mdf["pnl"] < 0).sum()) if not mdf.empty else 0
+        # Über den Monat offen gehalten: im/vor dem Monat eröffnet und am Monatsende
+        # noch nicht geschlossen (braucht Einstiegsdatum am Trade)
+        m_start = pd.Timestamp(y, mo, 1)
+        m_end = m_start + pd.offsets.MonthEnd(0)
+        op = pd.to_datetime(df.get("opened_dt"), errors="coerce")
+        cl = pd.to_datetime(df.get("closed_at"), errors="coerce")
+        held_open = int(((op.notna()) & (op <= m_end) & (cl.isna() | (cl > m_end))).sum()) if not df.empty else 0
+        if mdf.empty:
+            st.caption("Keine realisierten Trades in diesem Monat.")
+        else:
+            rM1 = st.columns(4)
+            kpi(rM1[0], "Netto P/L (Monat)", f"{m_pnl:+,.2f} {cur}", "pos" if m_pnl >= 0 else "neg")
+            kpi(rM1[1], "Netto R", f"{m_r:+.2f} R", "pos" if m_r >= 0 else "neg")
+            kpi(rM1[2], "Gewinner (TP)", f"{wins_m}", "pos" if wins_m else "neutral")
+            kpi(rM1[3], "Verlierer (SL)", f"{losses_m}", "neg" if losses_m else "neutral")
+            rM2 = st.columns(4)
+            kpi(rM2[0], "R gewonnen", f"{r_pos:+.2f} R", "pos" if r_pos else "neutral")
+            kpi(rM2[1], "R verloren", f"{r_neg:+.2f} R", "neg" if r_neg else "neutral")
+            kpi(rM2[2], "Trades (Monat)", f"{len(mdf)}", "neutral")
+            kpi(rM2[3], "Offen gehalten", f"{held_open}", "neutral")
+        st.markdown("<div style='margin-bottom:.6rem'></div>", unsafe_allow_html=True)
 
         import calendar as _cal
         weeks = _cal.Calendar(firstweekday=0).monthdayscalendar(y, mo)  # Montag zuerst (MEZ/DE)
@@ -770,8 +795,10 @@ def page_trades():
     df["Einstieg"] = df.get("opened_at")
     df["Ausstieg"] = df.get("closed_at")
     df["Haltetage"] = df.get("haltetage")
+    if "tranches" in df:
+        df["Tranchen"] = df["tranches"].map(lambda v: f"{int(v)}/3" if pd.notna(v) and int(v) < 3 else "—")
     cols = [c for c in ["Nr", "Einstieg", "Ausstieg", "Haltetage", "symbol", "direction",
-                        "setup", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
+                        "setup", "Tranchen", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
     show = df.sort_values("Nr", ascending=False)[cols]      # neueste zuerst anzeigen
     st.dataframe(show, use_container_width=True, hide_index=True)
     st.divider()
@@ -788,6 +815,9 @@ def page_trades():
         else:
             st.caption("Kein Screenshot.")
         badge = "🟡 läuft noch" if t.get("status") == "offen" else "✅ abgeschlossen"
+        tr_txt = ""
+        if t.get("tranches") and int(t["tranches"]) < 3:
+            tr_txt = f" · Tranchen {int(t['tranches'])}/3"
         dauer = ""
         if t.get("opened_at"):
             end = t.get("closed_at") or date.today().isoformat()
@@ -796,7 +826,7 @@ def page_trades():
                 dauer = f" · Haltedauer {tage} Tage"
             except Exception:
                 pass
-        st.write(f"**Nr {id_to_nr.get(sel, '?')}** · **{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}  \n"
+        st.write(f"**Nr {id_to_nr.get(sel, '?')}** · **{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}{tr_txt}  \n"
                  f"Einstieg {t.get('opened_at') or '—'} → Ausstieg {t.get('closed_at') or '—'}{dauer}  \n"
                  f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
                  f"P/L **{t.get('pnl')}** · {t.get('pnl_r')} R · {t.get('pips')} Pips")
@@ -844,11 +874,18 @@ def page_trades():
             setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
             # R fuer diesen Trade: Vorschlag aus 1R des Setups, aber ueberschreibbar
             risk_1r = store.risk_for(setup)
+            TR_OPTS_E = {"Voll (3/3)": 3, "2 von 3 Tranchen": 2, "1 von 3 Tranchen": 1}
+            cur_tr = int(t.get("tranches") or 3)
+            tr_idx = {3: 0, 2: 1, 1: 2}.get(cur_tr, 0)
+            tr_sel_e = st.selectbox("Position / Tranchen", list(TR_OPTS_E.keys()), index=tr_idx,
+                                    help="Nur Doku deines Teil-Einstiegs — nachfüllen jederzeit. "
+                                         "1 R bleibt immer der volle Betrag.")
+            new_tranches = TR_OPTS_E[tr_sel_e]
             suggested_r = (new_pnl / risk_1r) if (risk_1r and new_pnl) else float(t.get("pnl_r") or 0.0)
             rr1, rr2 = st.columns([2, 3])
             new_r = rr1.number_input("R-Multiple", value=round(suggested_r, 2), step=0.1, format="%.2f")
             if risk_1r:
-                rr2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} €  ·  Vorschlag: {suggested_r:+.2f} R")
+                rr2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} € (gilt immer, auch bei Tranchen)  ·  Vorschlag: {suggested_r:+.2f} R")
             else:
                 rr2.caption("Für dieses Setup ist noch **kein 1 R** hinterlegt (Einstellungen › 🎯 Risiko pro Setup).")
             sel_m = st.multiselect("Fehler-Tags", mistakes, default=t.get("mistakes") or [])
@@ -865,6 +902,7 @@ def page_trades():
                     "stop_price": cstop or None, "quantity": cq or None,
                     "setup": setup, "mistakes": sel_m,
                     "status": "offen" if will_open else "zu",
+                    "tranches": new_tranches,
                     "opened_at": c_open.isoformat(),
                     "closed_at": None if will_open else c_close.isoformat(),
                     "pnl": None if will_open else new_pnl,
