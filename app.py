@@ -89,14 +89,26 @@ def _secret(name):
     return os.environ.get(name)
 
 
+def _auth_token():
+    """Kurzes Token aus dem Passwort (niemals das Passwort selbst in der URL)."""
+    import hashlib
+    pw = _secret("APP_PASSWORD") or ""
+    return hashlib.sha256(f"tj-v1|{pw}".encode()).hexdigest()[:20]
+
+
 def require_login():
     if st.session_state.get("auth"):
+        return
+    # Eingeloggt bleiben nach Neuladen: Token in der Adresse pruefen
+    if st.query_params.get("s") == _auth_token():
+        st.session_state["auth"] = True
         return
     st.title("🔒 Trading Journal")
     pw = st.text_input("Passwort", type="password")
     if st.button("Einloggen"):
         if pw and pw == _secret("APP_PASSWORD"):
             st.session_state["auth"] = True
+            st.query_params["s"] = _auth_token()   # ueberlebt ⌘R
             st.rerun()
         else:
             st.error("Passwort falsch.")
@@ -193,6 +205,16 @@ def acct_id():
     return st.session_state.get("acct_id")
 
 
+def account_risk(aid=None):
+    """1 R in Euro — am KONTO hinterlegt (Einstellungen). 0 wenn nicht gesetzt."""
+    aid = aid or acct_id()
+    a = next((x for x in store.list_accounts() if x["id"] == aid), None)
+    try:
+        return float(a.get("risk_1r") or 0) if a else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # Gängige Symbole zum Auswählen (kein Tippen nötig)
 PAIRS = [
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD", "NZD/USD",
@@ -252,7 +274,7 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
                                      help="Trag hier einfach dein Ergebnis ein. Lässt du 0 stehen und füllst Entry/Exit/Lots aus, wird es automatisch berechnet.")
 
         # R-Multiple: aus 1R des Setups automatisch, aber vom Nutzer überschreibbar
-        risk_1r = store.risk_for(setup)
+        risk_1r = account_risk(account_id)
         # Teil-Einstiege: pro Tranche Datum + Entry + Groesse (reine Doku;
         # 1 R bleibt immer der volle Betrag, P/L bleibt EINE Gesamtsumme)
         tranche_rows = []
@@ -265,16 +287,14 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             ts = tc3.number_input(f"Tranche {i+1} — Größe (Lots)", value=0.0, format="%.4f", key=f"ts{i}{prefix}")
             tranche_rows.append({"datum": td.isoformat(), "entry": te or None, "size": ts or None})
         tranches = n_tr
-        auto_r = (pnl_manual / risk_1r) if (risk_1r and pnl_manual) else float(pv("pnl_r", 0.0) or 0.0)
-        cR1, cR2 = st.columns([2, 3])
-        r_manual = cR1.number_input(
-            "R-Multiple", value=round(auto_r, 2), step=0.1, format="%.2f", key=f"rm_r{prefix}",
-            help="Vielfaches deines Risikos. Wird automatisch aus 1 R des Setups berechnet — hier änderbar.")
+        # R vollautomatisch: € eingeben reicht — R = P/L / (1 R des Kontos)
+        auto_r = (pnl_manual / risk_1r) if (risk_1r and pnl_manual) else 0.0
+        r_manual = 0.0   # kein Eingabefeld mehr im Neu-Formular; Korrektur geht im Bearbeiten
         if risk_1r:
-            cR2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} € (gilt immer, auch bei Tranchen)  ·  automatisch: {auto_r:+.2f} R")
+            st.caption(f"🎯 1 R (Konto) = {risk_1r:,.2f} €  →  dieser Trade: **{auto_r:+.2f} R** (automatisch)")
         else:
-            cR2.caption("Für dieses Setup ist noch **kein 1 R** hinterlegt. "
-                        "→ Einstellungen › 🎯 Risiko pro Setup")
+            st.caption("🎯 Für dieses Konto ist noch **kein 1 R** hinterlegt "
+                       "→ Einstellungen › Konten › Feld „1 R (€)“")
 
         st.caption("Optional: Kurse für automatische Berechnung von P/L, R und Pips")
         c4, c5, c6, c7 = st.columns(4)
@@ -307,7 +327,7 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             "account_id": account_id, "symbol": sym, "direction": direction,
             "entry_price": e, "exit_price": x, "stop_price": sp, "quantity": q,
             "pnl": pnl,
-            "pnl_r": None if is_open else (r_manual if r_manual != 0 else compute_r(pnl, e, sp, q)),
+            "pnl_r": None if is_open else ((pnl / risk_1r) if (risk_1r and pnl) else compute_r(pnl, e, sp, q)),
             "pips": None if is_open else compute_pips(sym, direction, e, x),
             "status": "offen" if is_open else "zu",
             "tranches": tranches,
@@ -718,8 +738,11 @@ def page_new():
 
     if not sources:
         st.caption("Kein Bild? Du kannst alles manuell eintragen.")
-        if trade_form("manual", {}, setups, mistakes, rules, acct_id()):
-            st.success("Gespeichert ✔")
+        mver = st.session_state.get("manual_ver", 0)
+        if trade_form(f"manual~{mver}", {}, setups, mistakes, rules, acct_id()):
+            st.session_state["manual_ver"] = mver + 1   # leert das Formular fuer den naechsten Trade
+            st.toast("Gespeichert ✔ — bereit für den nächsten Trade")
+            st.rerun()
         return
 
     saved = st.session_state.setdefault("saved", set())
@@ -901,7 +924,7 @@ def page_trades():
                                       value=float(t.get("pnl") or 0.0), format="%.2f", step=1.0)
             setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
             # R fuer diesen Trade: Vorschlag aus 1R des Setups, aber ueberschreibbar
-            risk_1r = store.risk_for(setup)
+            risk_1r = account_risk(t.get("account_id") or acct_id())
             # Teil-Einstiege bearbeiten (Datum + Entry + Groesse je Tranche)
             new_td = []
             if n_tr_e > 1:
@@ -921,9 +944,9 @@ def page_trades():
             rr1, rr2 = st.columns([2, 3])
             new_r = rr1.number_input("R-Multiple", value=round(suggested_r, 2), step=0.1, format="%.2f")
             if risk_1r:
-                rr2.caption(f"1 R für **{setup}** = {risk_1r:,.2f} € (gilt immer, auch bei Tranchen)  ·  Vorschlag: {suggested_r:+.2f} R")
+                rr2.caption(f"🎯 1 R (Konto) = {risk_1r:,.2f} €  ·  Vorschlag: {suggested_r:+.2f} R")
             else:
-                rr2.caption("Für dieses Setup ist noch **kein 1 R** hinterlegt (Einstellungen › 🎯 Risiko pro Setup).")
+                rr2.caption("🎯 Für dieses Konto ist noch **kein 1 R** hinterlegt → Einstellungen › Konten.")
             sel_m = st.multiselect("Fehler-Tags", mistakes, default=t.get("mistakes") or [])
             r_in = st.text_area("Warum eingestiegen?", value=t.get("reason_entry") or "", height=70)
             r_out = st.text_area("Warum/wie geschlossen?", value=t.get("reason_exit") or "", height=70)
@@ -993,13 +1016,18 @@ def page_settings():
     st.title("⚙️ Einstellungen")
     st.subheader("Konten")
     for a in store.list_accounts():
-        c1, c2, c3 = st.columns([3, 2, 1])
+        c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
         c1.write(f"**{a['name']}** ({a.get('currency') or 'EUR'})")
         new_bal = c2.number_input("Startguthaben", value=float(a.get("start_balance") or 0),
                                   format="%.2f", step=100.0, key=f"bal{a['id']}")
         if new_bal != float(a.get("start_balance") or 0):
             store.update_account(a["id"], {"start_balance": new_bal})
-        if c3.button("Löschen", key=f"da{a['id']}"):
+        new_risk = c3.number_input("1 R (€)", value=float(a.get("risk_1r") or 0),
+                                   format="%.2f", step=100.0, key=f"risk{a['id']}",
+                                   help="Dein Risiko pro Trade in Euro. R wird automatisch daraus berechnet: R = P/L ÷ 1 R.")
+        if new_risk != float(a.get("risk_1r") or 0):
+            store.update_account(a["id"], {"risk_1r": new_risk})
+        if c4.button("Löschen", key=f"da{a['id']}"):
             store.delete_account(a["id"]); st.rerun()
     with st.form("aacc"):
         c1, c2, c3 = st.columns([2, 1, 1])
@@ -1009,30 +1037,6 @@ def page_settings():
         if st.form_submit_button("➕ Konto anlegen") and nm.strip():
             store.add_account(nm, cu, sb); st.rerun()
 
-    st.divider()
-    st.subheader("🎯 Risiko pro Setup (1 R)")
-    st.caption("Trag pro Setup ein, was **1 R** in Euro bedeutet (z. B. Swing 500, News 200). "
-               "Beim Trade wird das R-Multiple automatisch daraus berechnet, du kannst es pro Trade aber "
-               "jederzeit ändern.")
-    setups_all = store.get_list("setups") or []
-    risk_map = store.get_risk_map()
-    if not setups_all:
-        st.info("Zuerst Setups anlegen — siehe Bereich weiter unten.")
-    else:
-        with st.form("risk_setup_form"):
-            new_map = {}
-            for s in setups_all:
-                cA, cB = st.columns([2, 3])
-                cA.markdown(f"**{s}**")
-                v = cB.number_input(f"1 R für {s} (€)", value=float(risk_map.get(s, 0) or 0),
-                                    step=50.0, format="%.2f", key=f"risk_{s}",
-                                    label_visibility="collapsed")
-                if v > 0:
-                    new_map[s] = v
-            if st.form_submit_button("💾 Risiko-Werte speichern"):
-                store.set_risk_map(new_map)
-                st.success("Gespeichert ✔")
-                st.rerun()
 
     st.divider()
     st.subheader("💰 Ein-/Auszahlungen (aktives Konto)")
@@ -1110,6 +1114,7 @@ st.sidebar.radio("Navigation", list(PAGES.keys()), key="nav")
 st.sidebar.divider()
 st.sidebar.caption("Daten in der EU · nur für dich")
 if st.sidebar.button("Abmelden"):
+    st.query_params.clear()
     st.session_state.clear(); st.rerun()
 
 _ = PAGES[st.session_state["nav"]]()
