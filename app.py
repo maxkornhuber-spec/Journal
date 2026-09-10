@@ -973,7 +973,19 @@ def page_trades():
                     "management": r_mng.strip() or None, "notes": notes.strip() or None})
                 st.success("Aktualisiert ✔ — neu laden.")
         if st.button("🗑 Löschen"):
-            store.delete_trade(sel); st.warning("Gelöscht — neu laden.")
+            st.session_state[f"deltr_{sel}"] = True
+        if st.session_state.get(f"deltr_{sel}"):
+            st.error(f"⚠️ Trade **Nr {id_to_nr.get(sel, '?')}** ({t.get('symbol') or '—'}) wirklich "
+                     f"unwiderruflich löschen?")
+            dc1, dc2 = st.columns(2)
+            if dc1.button("🗑 Ja, endgültig löschen", key=f"deltrgo_{sel}"):
+                store.delete_trade(sel)
+                st.session_state.pop(f"deltr_{sel}", None)
+                st.success("Gelöscht ✔")
+                st.rerun()
+            if dc2.button("Abbrechen", key=f"deltrno_{sel}"):
+                st.session_state.pop(f"deltr_{sel}", None)
+                st.rerun()
 
 
 def page_coach():
@@ -1028,7 +1040,21 @@ def page_settings():
         if new_risk != float(a.get("risk_1r") or 0):
             store.update_account(a["id"], {"risk_1r": new_risk})
         if c4.button("Löschen", key=f"da{a['id']}"):
-            store.delete_account(a["id"]); st.rerun()
+            st.session_state[f"delacct_{a['id']}"] = True
+        if st.session_state.get(f"delacct_{a['id']}"):
+            st.error(f"⚠️ **{a['name']}** wirklich löschen? Damit werden auch ALLE Trades und "
+                     f"Ein-/Auszahlungen dieses Kontos unwiderruflich gelöscht.")
+            conf = st.text_input(f"Zum Bestätigen den Kontonamen exakt eintippen: {a['name']}",
+                                 key=f"delconf_{a['id']}")
+            cc_a, cc_b = st.columns(2)
+            if cc_a.button("🗑 Endgültig löschen", key=f"delgo_{a['id']}",
+                           disabled=(conf.strip() != a["name"])):
+                store.delete_account(a["id"])
+                st.session_state.pop(f"delacct_{a['id']}", None)
+                st.rerun()
+            if cc_b.button("Abbrechen", key=f"delno_{a['id']}"):
+                st.session_state.pop(f"delacct_{a['id']}", None)
+                st.rerun()
     with st.form("aacc"):
         c1, c2, c3 = st.columns([2, 1, 1])
         nm = c1.text_input("Neues Konto")
