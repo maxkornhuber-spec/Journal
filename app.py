@@ -205,16 +205,6 @@ def acct_id():
     return st.session_state.get("acct_id")
 
 
-def account_risk(aid=None):
-    """1 R in Euro — am KONTO hinterlegt (Einstellungen). 0 wenn nicht gesetzt."""
-    aid = aid or acct_id()
-    a = next((x for x in store.list_accounts() if x["id"] == aid), None)
-    try:
-        return float(a.get("risk_1r") or 0) if a else 0.0
-    except (TypeError, ValueError):
-        return 0.0
-
-
 # Gängige Symbole zum Auswählen (kein Tippen nötig)
 PAIRS = [
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD", "NZD/USD",
@@ -246,18 +236,22 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
     def pv(k, d=None):
         v = prefill.get(k); return v if v not in (None, "") else d
 
-    # Tranchen-Anzahl VOR dem Formular (nur so erscheinen die Zeilen sofort)
-    n_tr = st.selectbox("Tranchen (Teil-Einstiege)", [1, 2, 3], index=0, key=f"trn{prefix}",
-                        help="Wie viele Teil-Einstiege hat diese Position? "
-                             "1 R bleibt immer der volle Betrag deines Setups.")
+    # Setup VOR dem Formular: so zeigt die R-Anzeige sofort das richtige 1 R,
+    # wenn du zwischen Setups (Swing H1 / Swing H4 / Daytrade ...) wechselst.
+    setup = st.selectbox("Setup", setups or ["Sonstiges"], key=f"se{prefix}")
+    risk_1r = store.risk_for(setup)
+    if risk_1r:
+        st.caption(f"🎯 1 R für **{setup}** = {risk_1r:,.2f} € — das R wird automatisch daraus berechnet.")
+    else:
+        st.caption(f"🎯 Für das Setup **{setup}** ist noch **kein 1 R** hinterlegt "
+                   "→ Einstellungen › 🎯 Risiko pro Setup")
 
     with st.form(f"f_{prefix}"):
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         with c1:
             symbol = symbol_field(prefix, pv("symbol", ""))
         direction = c2.selectbox("Richtung", ["Long", "Short"],
                                  index=0 if str(pv("direction", "Long")).lower().startswith("l") else 1, key=f"di{prefix}")
-        setup = c3.selectbox("Setup", setups or ["Sonstiges"], key=f"se{prefix}")
 
         status = st.radio("Status", ["Abgeschlossen", "Läuft noch (offen)"], horizontal=True, key=f"stt{prefix}",
                           help="„Läuft noch“ = Trade ist offen. Er erscheint in der History, zählt aber erst in die Statistik, sobald du ihn abschließt.")
@@ -273,28 +267,6 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
                                      value=float(pv("pnl", 0.0)), format="%.2f", step=1.0, key=f"pn{prefix}",
                                      help="Trag hier einfach dein Ergebnis ein. Lässt du 0 stehen und füllst Entry/Exit/Lots aus, wird es automatisch berechnet.")
 
-        # R-Multiple: aus 1R des Setups automatisch, aber vom Nutzer überschreibbar
-        risk_1r = account_risk(account_id)
-        # Teil-Einstiege: pro Tranche Datum + Entry + Groesse (reine Doku;
-        # 1 R bleibt immer der volle Betrag, P/L bleibt EINE Gesamtsumme)
-        tranche_rows = []
-        if n_tr > 1:
-            st.caption(f"Teil-Einstiege ({n_tr} Tranchen)")
-        for i in range(n_tr):
-            tc1, tc2, tc3 = st.columns([2, 2, 2])
-            td = tc1.date_input(f"Tranche {i+1} — Datum", value=date.today(), key=f"td{i}{prefix}")
-            te = tc2.number_input(f"Tranche {i+1} — Entry", value=0.0, format="%.6f", key=f"te{i}{prefix}")
-            ts = tc3.number_input(f"Tranche {i+1} — Größe (Lots)", value=0.0, format="%.4f", key=f"ts{i}{prefix}")
-            tranche_rows.append({"datum": td.isoformat(), "entry": te or None, "size": ts or None})
-        tranches = n_tr
-        # R vollautomatisch: € eingeben reicht — R = P/L / (1 R des Kontos)
-        auto_r = (pnl_manual / risk_1r) if (risk_1r and pnl_manual) else 0.0
-        r_manual = 0.0   # kein Eingabefeld mehr im Neu-Formular; Korrektur geht im Bearbeiten
-        if risk_1r:
-            st.caption(f"🎯 1 R (Konto) = {risk_1r:,.2f} €  →  dieser Trade: **{auto_r:+.2f} R** (automatisch)")
-        else:
-            st.caption("🎯 Für dieses Konto ist noch **kein 1 R** hinterlegt "
-                       "→ Einstellungen › Konten › Feld „1 R (€)“")
 
         st.caption("Optional: Kurse für automatische Berechnung von P/L, R und Pips")
         c4, c5, c6, c7 = st.columns(4)
@@ -330,8 +302,6 @@ def trade_form(prefix, prefill, setups, mistakes, rules, account_id, image_bytes
             "pnl_r": None if is_open else ((pnl / risk_1r) if (risk_1r and pnl) else compute_r(pnl, e, sp, q)),
             "pips": None if is_open else compute_pips(sym, direction, e, x),
             "status": "offen" if is_open else "zu",
-            "tranches": tranches,
-            "tranche_data": tranche_rows,
             "opened_at": opened_d.isoformat(),
             "closed_at": None if is_open else closed_d.isoformat(),
             "setup": setup,
@@ -830,10 +800,8 @@ def page_trades():
     df["Einstieg"] = df.get("opened_at")
     df["Ausstieg"] = df.get("closed_at")
     df["Haltetage"] = df.get("haltetage")
-    if "tranches" in df:
-        df["Tranchen"] = df["tranches"].map(lambda v: f"{int(v)}×" if pd.notna(v) and int(v) > 1 else "—")
     cols = [c for c in ["Nr", "Einstieg", "Ausstieg", "Haltetage", "symbol", "direction",
-                        "setup", "Tranchen", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
+                        "setup", "Status", "pnl", "pips", "pnl_r", "rating"] if c in df]
     show = df.sort_values("Nr", ascending=False)[cols]      # neueste zuerst anzeigen
     st.dataframe(show, use_container_width=True, hide_index=True)
     st.divider()
@@ -850,10 +818,6 @@ def page_trades():
         else:
             st.caption("Kein Screenshot.")
         badge = "🟡 läuft noch" if t.get("status") == "offen" else "✅ abgeschlossen"
-        tr_txt = ""
-        td_list = t.get("tranche_data") if isinstance(t.get("tranche_data"), list) else []
-        if t.get("tranches") and int(t["tranches"]) > 1:
-            tr_txt = f" · {int(t['tranches'])} Tranchen"
         dauer = ""
         if t.get("opened_at"):
             end = t.get("closed_at") or date.today().isoformat()
@@ -862,19 +826,10 @@ def page_trades():
                 dauer = f" · Haltedauer {tage} Tage"
             except Exception:
                 pass
-        st.write(f"**Nr {id_to_nr.get(sel, '?')}** · **{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}{tr_txt}  \n"
+        st.write(f"**Nr {id_to_nr.get(sel, '?')}** · **{t.get('symbol')}** · {t.get('direction')} · {t.get('setup')} · {badge}  \n"
                  f"Einstieg {t.get('opened_at') or '—'} → Ausstieg {t.get('closed_at') or '—'}{dauer}  \n"
                  f"Entry {t.get('entry_price')} → Exit {t.get('exit_price')} · Stop {t.get('stop_price')}  \n"
                  f"P/L **{t.get('pnl')}** · {t.get('pnl_r')} R · {t.get('pips')} Pips")
-        if td_list:
-            lines = []
-            for i, tr in enumerate(td_list, start=1):
-                d_ = str(tr.get("datum") or "—")[:10]
-                e_ = tr.get("entry"); s_ = tr.get("size")
-                e_txt = f" @ {e_}" if e_ else ""
-                s_txt = f" · {s_} Lots" if s_ else ""
-                lines.append(f"Tranche {i}: {d_}{e_txt}{s_txt}")
-            st.caption("  \n".join(lines))
         if t.get("ai_setup") is not None:
             st.markdown(f"**KI-Urteil:** Setup {t['ai_setup']} · Ausführung {t.get('ai_exec')} · Psyche {t.get('ai_psych')}")
             if t.get("ai_weakness"): st.caption(f"Schwäche: {t['ai_weakness']}")
@@ -888,12 +843,17 @@ def page_trades():
     with right:
         setups = store.get_list("setups") or []; mistakes = store.get_list("mistakes") or []
         is_open_now = (t.get("status") == "offen")
-        saved_td = t.get("tranche_data") if isinstance(t.get("tranche_data"), list) else []
-        cur_tr = int(t.get("tranches") or (len(saved_td) if saved_td else 1))
-        cur_tr = min(max(cur_tr, 1), 3)
-        n_tr_e = st.selectbox("Tranchen (Teil-Einstiege)", [1, 2, 3], index=cur_tr - 1, key=f"trne{sel}",
-                              help="Nachgekauft? Einfach hochstellen und die neue Zeile ausfüllen. "
-                                   "1 R bleibt immer der volle Betrag.")
+        # Setup VOR dem Formular, damit das 1 R des gewaehlten Setups sofort angezeigt wird
+        setup = st.selectbox("Setup", setups,
+                             index=setups.index(t["setup"]) if t.get("setup") in setups else 0,
+                             key=f"esetup{sel}")
+        risk_1r = store.risk_for(setup)
+        if risk_1r:
+            st.caption(f"🎯 1 R für **{setup}** = {risk_1r:,.2f} € — R wird beim Speichern automatisch "
+                       f"aus dem P/L berechnet.")
+        else:
+            st.caption(f"🎯 Für das Setup **{setup}** ist noch **kein 1 R** hinterlegt "
+                       "→ Einstellungen › 🎯 Risiko pro Setup")
         with st.form("edit"):
             st.markdown("**Trade bearbeiten**")
             if is_open_now:
@@ -922,31 +882,6 @@ def page_trades():
             cq = e6.number_input("Lots / Größe", value=float(t.get("quantity") or 0.0), format="%.4f")
             new_pnl = st.number_input("Gewinn / Verlust in € (Minus = Verlust)",
                                       value=float(t.get("pnl") or 0.0), format="%.2f", step=1.0)
-            setup = st.selectbox("Setup", setups, index=setups.index(t["setup"]) if t.get("setup") in setups else 0)
-            # R fuer diesen Trade: Vorschlag aus 1R des Setups, aber ueberschreibbar
-            risk_1r = account_risk(t.get("account_id") or acct_id())
-            # Teil-Einstiege bearbeiten (Datum + Entry + Groesse je Tranche)
-            new_td = []
-            if n_tr_e > 1:
-                st.caption(f"Teil-Einstiege ({n_tr_e} Tranchen)")
-            for i in range(n_tr_e):
-                old = saved_td[i] if i < len(saved_td) else {}
-                tc1, tc2, tc3 = st.columns([2, 2, 2])
-                td_v = tc1.date_input(f"Tranche {i+1} — Datum", value=_parse_d(old.get("datum")),
-                                      key=f"etd{i}{sel}")
-                te_v = tc2.number_input(f"Tranche {i+1} — Entry", value=float(old.get("entry") or 0.0),
-                                        format="%.6f", key=f"ete{i}{sel}")
-                ts_v = tc3.number_input(f"Tranche {i+1} — Größe (Lots)", value=float(old.get("size") or 0.0),
-                                        format="%.4f", key=f"ets{i}{sel}")
-                new_td.append({"datum": td_v.isoformat(), "entry": te_v or None, "size": ts_v or None})
-            new_tranches = n_tr_e
-            suggested_r = (new_pnl / risk_1r) if (risk_1r and new_pnl) else float(t.get("pnl_r") or 0.0)
-            rr1, rr2 = st.columns([2, 3])
-            new_r = rr1.number_input("R-Multiple", value=round(suggested_r, 2), step=0.1, format="%.2f")
-            if risk_1r:
-                rr2.caption(f"🎯 1 R (Konto) = {risk_1r:,.2f} €  ·  Vorschlag: {suggested_r:+.2f} R")
-            else:
-                rr2.caption("🎯 Für dieses Konto ist noch **kein 1 R** hinterlegt → Einstellungen › Konten.")
             sel_m = st.multiselect("Fehler-Tags", mistakes, default=t.get("mistakes") or [])
             r_in = st.text_area("Warum eingestiegen?", value=t.get("reason_entry") or "", height=70)
             r_out = st.text_area("Warum/wie geschlossen?", value=t.get("reason_exit") or "", height=70)
@@ -961,12 +896,10 @@ def page_trades():
                     "stop_price": cstop or None, "quantity": cq or None,
                     "setup": setup, "mistakes": sel_m,
                     "status": "offen" if will_open else "zu",
-                    "tranches": new_tranches,
-                    "tranche_data": new_td,
                     "opened_at": c_open.isoformat(),
                     "closed_at": None if will_open else c_close.isoformat(),
                     "pnl": None if will_open else new_pnl,
-                    "pnl_r": None if will_open else (new_r if new_r != 0
+                    "pnl_r": None if will_open else ((new_pnl / risk_1r) if (risk_1r and new_pnl)
                                                     else compute_r(new_pnl, ce or None, cstop or None, cq or None)),
                     "pips": None if will_open else compute_pips(sym, cdir, ce or None, cx or None),
                     "reason_entry": r_in.strip() or None, "reason_exit": r_out.strip() or None,
@@ -1028,17 +961,12 @@ def page_settings():
     st.title("⚙️ Einstellungen")
     st.subheader("Konten")
     for a in store.list_accounts():
-        c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+        c1, c2, c4 = st.columns([3, 2, 1])
         c1.write(f"**{a['name']}** ({a.get('currency') or 'EUR'})")
         new_bal = c2.number_input("Startguthaben", value=float(a.get("start_balance") or 0),
                                   format="%.2f", step=100.0, key=f"bal{a['id']}")
         if new_bal != float(a.get("start_balance") or 0):
             store.update_account(a["id"], {"start_balance": new_bal})
-        new_risk = c3.number_input("1 R (€)", value=float(a.get("risk_1r") or 0),
-                                   format="%.2f", step=100.0, key=f"risk{a['id']}",
-                                   help="Dein Risiko pro Trade in Euro. R wird automatisch daraus berechnet: R = P/L ÷ 1 R.")
-        if new_risk != float(a.get("risk_1r") or 0):
-            store.update_account(a["id"], {"risk_1r": new_risk})
         if c4.button("Löschen", key=f"da{a['id']}"):
             st.session_state[f"delacct_{a['id']}"] = True
         if st.session_state.get(f"delacct_{a['id']}"):
@@ -1062,6 +990,30 @@ def page_settings():
         sb = c3.number_input("Startguthaben", value=0.0, format="%.2f", step=100.0)
         if st.form_submit_button("➕ Konto anlegen") and nm.strip():
             store.add_account(nm, cu, sb); st.rerun()
+
+    st.divider()
+    st.subheader("🎯 Risiko pro Setup (1 R)")
+    st.caption("Trag pro Setup ein, was **1 R** für dich in Euro bedeutet — z. B. Daytrade 500, "
+               "Swing H1 1.000, Swing H4 2.000. Beim Trade wählst du nur das Setup und gibst den "
+               "€-Gewinn/-Verlust ein; das R wird automatisch berechnet (R = P/L ÷ 1 R des Setups).")
+    setups_all = store.get_list("setups") or []
+    risk_map = store.get_risk_map()
+    if not setups_all:
+        st.info("Zuerst Setups anlegen — siehe Bereich „Setups“ weiter unten.")
+    else:
+        with st.form("risk_setup_form"):
+            new_map = dict(risk_map)
+            for s in setups_all:
+                cA, cB = st.columns([2, 3])
+                cA.markdown(f"**{s}**")
+                v = cB.number_input(f"1 R für {s} (€)", value=float(risk_map.get(s, 0) or 0),
+                                    step=100.0, format="%.2f", key=f"risk_{s}",
+                                    label_visibility="collapsed")
+                new_map[s] = v
+            if st.form_submit_button("💾 Risiko-Werte speichern"):
+                store.set_risk_map(new_map)
+                st.success("Gespeichert ✔")
+                st.rerun()
 
 
     st.divider()
